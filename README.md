@@ -47,6 +47,10 @@ This project is currently in early development.
 * Andrychowicz et al. (2016) — Learning to learn by gradient descent
 * Benning et al. (2021) — Bregman optimisation methods
 
+## 🔗 Related Work
+
+- Descend (Moseley et al., 2024): https://gitlab.com/benmoseley/descend-pmlr-2024
+
 ## 👤 Author
 
 Francesco Giuseppe Remondi
