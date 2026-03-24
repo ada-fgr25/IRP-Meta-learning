@@ -41,6 +41,50 @@ data/           # Synthetic datasets (if included)
 
 This project is currently in early development.
 
+## 🚀 Research Roadmap
+
+The project will be developed progressively, starting from simple and interpretable baselines towards more advanced learned optimisation strategies.
+
+### Phase 1 — Classical FWI Baseline
+
+* Implement differentiable FWI with forward and adjoint solvers
+* Optimisation using standard methods (SGD, Adam, L-BFGS)
+* Establish baseline performance and evaluation metrics
+
+### Phase 2 — Meta-Learned Scalar Optimisation
+
+* Learn global optimisation hyperparameters (learning rate, momentum)
+* Explore time-dependent or piecewise schedules
+* Compare against classical optimisers
+
+### Phase 3 — Spatially Adaptive Updates
+
+* Learn spatially varying step sizes (diagonal preconditioning)
+* Introduce simple learned mappings from gradients to updates
+
+### Phase 4 — Learned Update Operators
+
+* Parameterise update rules using neural networks (e.g. CNNs)
+* Incorporate gradient history and optimisation state
+* Study stability and generalisation
+
+### Phase 5 — Geometry-Aware Optimisation
+
+* Explore structured update rules inspired by non-Euclidean optimisation
+* Investigate connections to Bregman distances and learned metrics
+
+### Phase 6 — Uncertainty-Aware Optimisation (Exploratory)
+
+* Model uncertainty in update steps (stochastic optimisation)
+* Investigate its role in exploration vs refinement
+* Explore uncertainty-based stopping criteria
+
+### Phase 7 — Evaluation and Analysis
+
+* Benchmark across synthetic datasets
+* Analyse convergence behaviour and robustness
+* Study generalisation across different problem instances
+
 ## 📖 References
 
 * Adler & Öktem (2017) — Learned iterative reconstruction
