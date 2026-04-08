@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+stride = [
+    "stride @ git+https://github.com/trustimaging/stride.git"
+]
 dev = [
 "black",
 "ruff",
@@ -47,5 +50,3 @@ skip-string-normalization = false
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-
-[tool.ruff.li]()
