@@ -159,6 +159,12 @@ This wrapper simply orchestrates the reference scripts already stored under
 `resources/stride_fwi_brain/`. It is intended for benchmarking and qualitative
 comparison, not for differentiable meta-learning.
 
+Replication note:
+
+* The wrapper is not its own Stride reimplementation. Reproducing the benchmark requires the bundled Stride scripts in `resources/stride_fwi_brain/`, especially [01_script_forward.py](/home/fgr25/IRP/IRP-Meta-learning/resources/stride_fwi_brain/01_script_forward.py) and [02_script_inverse.py](/home/fgr25/IRP/IRP-Meta-learning/resources/stride_fwi_brain/02_script_inverse.py).
+* With the default resource directory, the benchmark settings come from those scripts directly: elliptical geometry with `256` locations, `0.25 MHz` tone-burst source, `3` inversion blocks, `8` iterations per block, `32` shots per iteration, `f_max` schedule `[0.1, 0.2, 0.3] MHz`, `OT4` kernel, Hicks interpolation, and `cpu` platform.
+* You can inspect the exact commands and the encoded benchmark settings without running Stride via `PYTHONPATH=src python experiments/stride_brain_benchmark.py --dry-run --mode both`.
+
 ## 👤 Author
 
 Francesco Giuseppe Remondi

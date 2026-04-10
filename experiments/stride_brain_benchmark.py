@@ -53,6 +53,7 @@ def _summary(runner: StrideBenchmarkRunner) -> dict[str, object]:
     acquisitions_path = runner.acquisitions_path()
     return {
         "resource_dir": str(runner.layout.resource_dir.resolve()),
+        "reference_settings": runner.reference_settings(),
         "acquisitions_exists": acquisitions_path.exists(),
         "acquisitions_path": str(acquisitions_path),
         "n_velocity_snapshots": len(snapshots),
@@ -75,7 +76,15 @@ def main():
             commands.append(runner.forward_command())
         if args.mode in {"inverse", "both"}:
             commands.append(runner.inverse_command())
-        print(json.dumps({"commands": commands}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "commands": commands,
+                    "reference_settings": runner.reference_settings(),
+                },
+                indent=2,
+            )
+        )
         return
 
     if args.mode in {"forward", "both"}:

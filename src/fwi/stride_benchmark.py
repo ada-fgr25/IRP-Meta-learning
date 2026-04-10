@@ -124,3 +124,40 @@ class StrideBenchmarkRunner:
 
         self.layout.validate()
         return (self.layout.resource_dir / "alpha2D-Acquisitions.h5").resolve()
+
+    def reference_settings(self) -> dict[str, object]:
+        """Describe the benchmark settings encoded in the bundled scripts.
+
+        These values are intentionally documented here because the wrapper does
+        not reimplement the benchmark itself; it launches the local Stride
+        scripts verbatim. Making the expected settings explicit helps other
+        researchers understand what they are reproducing when they use this
+        wrapper with the default resource directory.
+        """
+
+        self.layout.validate()
+        return {
+            "depends_on_bundled_stride_scripts": True,
+            "forward_script": str(self.layout.forward_script_path()),
+            "inverse_script": str(self.layout.inverse_script_path()),
+            "geometry": "elliptical",
+            "num_locations": 256,
+            "space_shape": [500, 370],
+            "space_extra": [50, 50],
+            "space_absorbing": [40, 40],
+            "space_spacing_m": [0.5e-3, 0.5e-3],
+            "time_start_s": 0.0,
+            "time_step_s": 0.08e-6,
+            "time_num": 2500,
+            "source_centre_frequency_hz": 0.25e6,
+            "source_cycles": 3,
+            "inverse_num_blocks": 3,
+            "inverse_max_freqs_hz": [0.1e6, 0.2e6, 0.3e6],
+            "inverse_num_iters_per_block": 8,
+            "inverse_num_shots_per_iter": 32,
+            "inverse_step_size": 5.0,
+            "platform": "cpu",
+            "kernel": "OT4",
+            "interpolation_type": "hicks",
+            "fw3d_mode": True,
+        }
