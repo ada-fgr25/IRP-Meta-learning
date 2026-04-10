@@ -1,4 +1,9 @@
-"""Run the Phase 1 differentiable brain FWI baseline."""
+"""Run the Phase 1 differentiable brain FWI baseline.
+
+This script is intentionally lightweight: it assembles a baseline synthetic
+brain-imaging FWI problem, runs one classical optimiser, writes metrics/history
+to disk, and optionally displays the reconstruction figure interactively.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +20,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
-from irp_meta_learning.fwi.acoustics import simulate_survey
-from irp_meta_learning.fwi.config import (
+from fwi.acoustics import simulate_survey
+from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
     GridConfig,
@@ -24,13 +29,18 @@ from irp_meta_learning.fwi.config import (
     SolverConfig,
     TimeConfig,
 )
-from irp_meta_learning.fwi.metrics import compute_metrics
-from irp_meta_learning.fwi.optimisers import run_adam, run_lbfgsb, run_sgd
-from irp_meta_learning.fwi.problem import dldx, init_params
+from fwi.metrics import compute_metrics
+from fwi.optimisers import run_adam, run_lbfgsb, run_sgd
+from fwi.problem import dldx, init_params
 
 
 def parse_args():
-    """Parse command-line arguments for the baseline experiment."""
+    """Parse command-line arguments for the baseline experiment.
+
+    The defaults target a modest CPU-sized problem so the experiment can be run
+    from a laptop terminal. For larger runs we can increase the grid size, the
+    recording duration, and the number of shots/transducers.
+    """
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--optimizer", choices=["sgd", "adam", "lbfgsb"], default="adam")
@@ -41,12 +51,26 @@ def parse_args():
     parser.add_argument("--nt", type=int, default=320)
     parser.add_argument("--n-transducers", type=int, default=24)
     parser.add_argument("--n-shots", type=int, default=6)
-    parser.add_argument("--output-dir", type=Path, default=Path("experiments/outputs/phase1_brain_fwi"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("experiments/outputs/phase1_brain_fwi"),
+    )
+    parser.add_argument(
+        "--show-plots",
+        action="store_true",
+        help="Display the reconstruction figure in an interactive window as well as saving it.",
+    )
     return parser.parse_args()
 
 
 def build_config(args) -> BrainFWIConfig:
-    """Build an experiment configuration from CLI options."""
+    """Build an experiment configuration from CLI options.
+
+    Keeping this translation in one place makes it easier to later swap the
+    CLI parser for YAML configs or notebook-driven experiments without having to
+    touch the inversion code itself.
+    """
 
     return BrainFWIConfig(
         grid=GridConfig(nx=args.nx, ny=args.ny),
@@ -119,15 +143,25 @@ def main():
         figure.colorbar(im, ax=ax)
         ax.set_title(title)
     figure.tight_layout()
-    figure.savefig(args.output_dir / f"{args.optimizer}_reconstruction.png", dpi=150)
-    plt.close(figure)
+    reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
+    metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
+    history_path = args.output_dir / f"{args.optimizer}_history.json"
+    figure.savefig(reconstruction_path, dpi=150)
 
-    with (args.output_dir / f"{args.optimizer}_metrics.json").open("w", encoding="utf-8") as fh:
+    with metrics_path.open("w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2)
-    with (args.output_dir / f"{args.optimizer}_history.json").open("w", encoding="utf-8") as fh:
+    with history_path.open("w", encoding="utf-8") as fh:
         json.dump(history, fh, indent=2)
 
     print(json.dumps(metrics, indent=2))
+    print(f"Saved reconstruction plot to: {reconstruction_path}")
+    print(f"Saved metrics to: {metrics_path}")
+    print(f"Saved optimisation history to: {history_path}")
+
+    if args.show_plots:
+        plt.show()
+    else:
+        plt.close(figure)
 
 
 if __name__ == "__main__":

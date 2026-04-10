@@ -7,13 +7,13 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from irp_meta_learning.fwi.config import (
+from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
     GridConfig,
     TimeConfig,
 )
-from irp_meta_learning.fwi.problem import dldx, init_params
+from fwi.problem import dldx, init_params
 
 
 def _tiny_config() -> BrainFWIConfig:
