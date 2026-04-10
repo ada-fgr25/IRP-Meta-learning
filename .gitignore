@@ -212,3 +212,8 @@ resources/
 
 # Generated experiment artefacts
 experiments/outputs/
+
+# Generated Stride benchmark artefacts
+experiments/stride_brain_reference/alpha2D-Acquisitions.h5
+experiments/stride_brain_reference/alpha2D-Vp-*.h5
+experiments/stride_brain_reference/mosaic-workspace/
