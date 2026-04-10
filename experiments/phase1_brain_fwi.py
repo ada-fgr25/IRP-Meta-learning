@@ -107,6 +107,14 @@ def _split_steps(total_steps: int, n_stages: int) -> tuple[int, ...]:
     return tuple(base + (1 if i < remainder else 0) for i in range(n_stages))
 
 
+def _shared_limits(images):
+    """Return a common color scale for a collection of absolute model images."""
+
+    vmin = min(float(image.min()) for image in images)
+    vmax = max(float(image.max()) for image in images)
+    return vmin, vmax
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -176,10 +184,19 @@ def main():
         image = snapshots.get(step, x_hat if step >= args.steps else x0)
         panels.append((f"Step {step}", image))
 
+    absolute_images = [image for _, image in panels]
+    abs_vmin, abs_vmax = _shared_limits(absolute_images)
+
     figure = plt.figure(figsize=(4 * len(panels), 4))
     axes = figure.subplots(1, len(panels))
     for ax, (title, image) in zip(axes, panels):
-        im = ax.imshow(image.T, origin="lower", cmap="viridis")
+        im = ax.imshow(
+            image.T,
+            origin="lower",
+            cmap="viridis",
+            vmin=abs_vmin,
+            vmax=abs_vmax,
+        )
         figure.colorbar(im, ax=ax)
         ax.set_title(title)
 
