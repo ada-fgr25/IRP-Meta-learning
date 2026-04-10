@@ -11,6 +11,7 @@ from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
     GridConfig,
+    ModelConfig,
     TimeConfig,
 )
 from fwi.problem import dldx, init_params
@@ -23,6 +24,7 @@ def _tiny_config() -> BrainFWIConfig:
         grid=GridConfig(nx=32, ny=24),
         time=TimeConfig(nt=40),
         acquisition=AcquisitionConfig(n_transducers=12, n_shots=3),
+        model=ModelConfig(source="procedural"),
     )
 
 

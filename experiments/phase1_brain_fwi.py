@@ -93,6 +93,7 @@ def main():
     config = build_config(args)
     key = jax.random.PRNGKey(0)
     params = init_params(key, config=config, backend_name="jax")
+    config = params["config"]
     x0, auxs, x_exact = params["x0"], (params["y_obs"],), params["x_exact"]
     bounds = (config.model.min_velocity, config.model.max_velocity)
 
@@ -134,7 +135,10 @@ def main():
     metrics["n_transducers"] = config.acquisition.n_transducers
     metrics["n_shots"] = config.acquisition.n_shots
     metrics["n_receivers_per_shot"] = int(params["geometry"]["transducer_indices"].shape[0])
-
+    metrics["model_source"] = config.model.source
+    reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
+    metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
+    history_path = args.output_dir / f"{args.optimizer}_history.json"
     figure = plt.figure(figsize=(12, 4))
     axes = figure.subplots(1, 3)
     for ax, image, title in zip(
@@ -145,10 +149,8 @@ def main():
         im = ax.imshow(image.T, origin="lower", cmap="viridis")
         figure.colorbar(im, ax=ax)
         ax.set_title(title)
+
     figure.tight_layout()
-    reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
-    metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
-    history_path = args.output_dir / f"{args.optimizer}_history.json"
     figure.savefig(reconstruction_path, dpi=150)
 
     with metrics_path.open("w", encoding="utf-8") as fh:

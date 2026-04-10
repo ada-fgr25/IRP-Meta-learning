@@ -61,11 +61,19 @@ class AcquisitionConfig:
 class ModelConfig:
     """Velocity bounds and phantom controls for the inversion model.
 
-    The four velocity values define the synthetic anatomy:
-    coupling medium, soft brain tissue, skull, and a lesion-like inclusion.
-    `min_velocity` and `max_velocity` are inversion-time box constraints.
+    `source` selects whether the experiment uses the lightweight procedural
+    phantom or the tracked Stride HDF5 velocity models in `data/`.
+
+    The four velocity values define the synthetic anatomy used by the
+    procedural fallback: coupling medium, soft brain tissue, skull, and a
+    lesion-like inclusion. `min_velocity` and `max_velocity` are inversion-time
+    box constraints regardless of source.
     """
 
+    source: str = "stride"
+    true_model_path: str = "data/alpha2D-TrueModel.h5"
+    starting_model_path: str = "data/alpha2D-StartingModel.h5"
+    stride_downsample: int = 5
     background_velocity: float = 1500.0
     brain_velocity: float = 1560.0
     skull_velocity: float = 2400.0

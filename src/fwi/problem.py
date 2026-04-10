@@ -7,6 +7,9 @@ loss, and obtain gradients with respect to the model.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import h5py
 import jax
 import jax.numpy as jnp
 
@@ -14,6 +17,53 @@ from .acoustics import build_geometry
 from .backends import build_backend
 from .config import BrainFWIConfig
 from .phantoms import build_initial_velocity, build_true_brain_velocity
+
+
+def _load_stride_field(path: str, downsample: int) -> tuple[jnp.ndarray, tuple[float, float]]:
+    """Load and optionally downsample a Stride HDF5 scalar field.
+
+    The Stride example stores both the grid spacing and the model samples in the
+    file. We preserve that metadata here so the JAX solver sees a geometry that
+    matches the loaded model rather than the old hard-coded toy grid.
+    """
+
+    with h5py.File(path, "r") as handle:
+        data = handle["data"][()]
+        spacing = tuple(float(v) for v in handle["space/spacing"][()])
+
+    stride = max(int(downsample), 1)
+    data = data[::stride, ::stride]
+    spacing = (spacing[0] * stride, spacing[1] * stride)
+    return jnp.asarray(data), spacing
+
+
+def _initialise_models(config: BrainFWIConfig) -> tuple[BrainFWIConfig, jnp.ndarray, jnp.ndarray]:
+    """Build the true and starting models for the selected data source."""
+
+    if config.model.source == "procedural":
+        x_exact = build_true_brain_velocity(config)
+        x0 = build_initial_velocity(config)
+        return config, x_exact, x0
+
+    if config.model.source != "stride":
+        raise ValueError(f"Unknown model source '{config.model.source}'.")
+
+    x_exact, spacing = _load_stride_field(
+        config.model.true_model_path, config.model.stride_downsample
+    )
+    x0, _ = _load_stride_field(
+        config.model.starting_model_path, config.model.stride_downsample
+    )
+
+    grid = replace(
+        config.grid,
+        nx=int(x_exact.shape[0]),
+        ny=int(x_exact.shape[1]),
+        dx=float(spacing[0]),
+        dy=float(spacing[1]),
+    )
+    config = replace(config, grid=grid)
+    return config, x_exact, x0
 
 
 def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "jax"):
@@ -30,10 +80,9 @@ def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "
 
     del key
     config = config or BrainFWIConfig()
+    config, x_exact, x0 = _initialise_models(config)
     geometry = build_geometry(config)
     backend = build_backend(backend_name)
-    x_exact = build_true_brain_velocity(config)
-    x0 = build_initial_velocity(config)
     y_obs = backend.forward(x_exact, geometry, config)
 
     return {
