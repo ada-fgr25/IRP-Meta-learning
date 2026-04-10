@@ -47,12 +47,14 @@ def run_optax(
     n_steps: int,
     bounds: tuple[float, float],
     true_model: Array | None = None,
+    snapshot_steps: tuple[int, ...] = (0, 10, 20),
 ):
     """Run a standard Optax optimiser on the FWI objective."""
 
     model = model_init
     state = optimiser.init(model)
     history = []
+    snapshots = {0: jnp.array(model_init)}
 
     for step in range(n_steps):
         loss_value, grad = loss_grad_fn(model)
@@ -60,9 +62,12 @@ def run_optax(
         model = optax.apply_updates(model, updates)
         model = _project_velocity(model, bounds)
         history.append(_step_metrics(step, model, loss_value, true_model))
+        iteration = step + 1
+        if iteration in snapshot_steps:
+            snapshots[iteration] = jnp.array(model)
 
     final_loss, _ = loss_grad_fn(model)
-    return model, history, float(jnp.asarray(final_loss).reshape(()))
+    return model, history, float(jnp.asarray(final_loss).reshape(())), snapshots
 
 
 def run_sgd(
@@ -72,11 +77,20 @@ def run_sgd(
     n_steps: int,
     bounds: tuple[float, float],
     true_model: Array | None = None,
+    snapshot_steps: tuple[int, ...] = (0, 10, 20),
 ):
     """Run SGD on the FWI objective."""
 
     optimiser = optax.sgd(learning_rate=learning_rate)
-    return run_optax(model_init, loss_grad_fn, optimiser, n_steps, bounds, true_model)
+    return run_optax(
+        model_init,
+        loss_grad_fn,
+        optimiser,
+        n_steps,
+        bounds,
+        true_model,
+        snapshot_steps,
+    )
 
 
 def run_adam(
@@ -86,11 +100,20 @@ def run_adam(
     n_steps: int,
     bounds: tuple[float, float],
     true_model: Array | None = None,
+    snapshot_steps: tuple[int, ...] = (0, 10, 20),
 ):
     """Run Adam on the FWI objective."""
 
     optimiser = optax.adam(learning_rate=learning_rate)
-    return run_optax(model_init, loss_grad_fn, optimiser, n_steps, bounds, true_model)
+    return run_optax(
+        model_init,
+        loss_grad_fn,
+        optimiser,
+        n_steps,
+        bounds,
+        true_model,
+        snapshot_steps,
+    )
 
 
 def run_lbfgsb(
@@ -99,11 +122,13 @@ def run_lbfgsb(
     maxiter: int,
     bounds: tuple[float, float],
     true_model: Array | None = None,
+    snapshot_steps: tuple[int, ...] = (0, 10, 20),
 ):
     """Run SciPy L-BFGS-B using JAX-generated gradients."""
 
     shape = model_init.shape
     history = []
+    snapshots = {0: jnp.array(model_init)}
 
     def objective(flat_model: np.ndarray):
         model = jnp.asarray(flat_model.reshape(shape))
@@ -115,6 +140,9 @@ def run_lbfgsb(
         model = jnp.asarray(flat_model.reshape(shape))
         loss_value, _ = loss_grad_fn(model)
         history.append(_step_metrics(len(history), model, loss_value, true_model))
+        iteration = len(history)
+        if iteration in snapshot_steps:
+            snapshots[iteration] = jnp.array(model)
 
     scipy_bounds = [bounds] * int(np.prod(shape))
     result = optimize.minimize(
@@ -131,4 +159,6 @@ def run_lbfgsb(
     final_loss, _ = loss_grad_fn(model)
     if not history:
         history.append(_step_metrics(0, model, final_loss, true_model))
-    return model, history, float(jnp.asarray(final_loss).reshape(()))
+    if maxiter in snapshot_steps:
+        snapshots[maxiter] = jnp.array(model)
+    return model, history, float(jnp.asarray(final_loss).reshape(())), snapshots

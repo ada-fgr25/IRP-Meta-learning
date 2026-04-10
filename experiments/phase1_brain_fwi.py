@@ -101,7 +101,7 @@ def main():
     loss_grad_fn = jax.jit(lambda model: dldx(params, model, auxs))
 
     if args.optimizer == "sgd":
-        x_hat, history, final_loss = run_sgd(
+        x_hat, history, final_loss, snapshots = run_sgd(
             x0,
             loss_grad_fn,
             learning_rate=args.learning_rate,
@@ -110,7 +110,7 @@ def main():
             true_model=x_exact,
         )
     elif args.optimizer == "adam":
-        x_hat, history, final_loss = run_adam(
+        x_hat, history, final_loss, snapshots = run_adam(
             x0,
             loss_grad_fn,
             learning_rate=args.learning_rate,
@@ -119,7 +119,7 @@ def main():
             true_model=x_exact,
         )
     else:
-        x_hat, history, final_loss = run_lbfgsb(
+        x_hat, history, final_loss, snapshots = run_lbfgsb(
             x0,
             loss_grad_fn,
             maxiter=args.steps,
@@ -139,13 +139,15 @@ def main():
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
-    figure = plt.figure(figsize=(12, 4))
-    axes = figure.subplots(1, 3)
-    for ax, image, title in zip(
-        axes,
-        [x_exact, x0, x_hat],
-        ["True velocity", "Initial model", "Recovered model"],
-    ):
+    checkpoint_steps = [0, 10, 20]
+    panels = [("True velocity", x_exact)]
+    for step in checkpoint_steps:
+        image = snapshots.get(step, x_hat if step >= args.steps else x0)
+        panels.append((f"Step {step}", image))
+
+    figure = plt.figure(figsize=(4 * len(panels), 4))
+    axes = figure.subplots(1, len(panels))
+    for ax, (title, image) in zip(axes, panels):
         im = ax.imshow(image.T, origin="lower", cmap="viridis")
         figure.colorbar(im, ax=ax)
         ax.set_title(title)
