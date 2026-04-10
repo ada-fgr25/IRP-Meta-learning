@@ -131,6 +131,9 @@ def main():
     metrics["final_loss"] = final_loss
     metrics["optimizer"] = args.optimizer
     metrics["steps"] = args.steps
+    metrics["n_transducers"] = config.acquisition.n_transducers
+    metrics["n_shots"] = config.acquisition.n_shots
+    metrics["n_receivers_per_shot"] = int(params["geometry"]["transducer_indices"].shape[0])
 
     figure = plt.figure(figsize=(12, 4))
     axes = figure.subplots(1, 3)
@@ -154,6 +157,11 @@ def main():
         json.dump(history, fh, indent=2)
 
     print(json.dumps(metrics, indent=2))
+    print(
+        "Acquisition: "
+        f"{config.acquisition.n_shots} shots, "
+        f"{config.acquisition.n_transducers} transducers"
+    )
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved metrics to: {metrics_path}")
     print(f"Saved optimisation history to: {history_path}")
