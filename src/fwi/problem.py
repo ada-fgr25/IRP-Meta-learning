@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import h5py
 import jax
 import jax.numpy as jnp
 
@@ -30,6 +29,10 @@ def _load_stride_field(
     default experiment path now uses the native Stride resolution, and this
     downsampling hook is only retained as an escape hatch for cheaper debugging.
     """
+
+    # Import lazily so procedural-only workflows do not need the HDF5 runtime
+    # just to import the generic problem module.
+    import h5py
 
     with h5py.File(path, "r") as handle:
         data = handle["data"][()]
