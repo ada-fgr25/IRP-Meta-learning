@@ -162,3 +162,49 @@ def run_lbfgsb(
     if maxiter in snapshot_steps:
         snapshots[maxiter] = jnp.array(model)
     return model, history, float(jnp.asarray(final_loss).reshape(())), snapshots
+
+
+def run_stagewise_optax(
+    model_init: Array,
+    make_loss_grad_fn: Callable[[int], Callable[[Array], tuple[Array, Array]]],
+    optimiser_factory: Callable[[], optax.GradientTransformation],
+    stage_steps: tuple[int, ...],
+    bounds: tuple[float, float],
+    true_model: Array | None = None,
+    snapshot_steps: tuple[int, ...] = (0, 10, 20),
+):
+    """Run an Optax optimiser across multiple continuation stages.
+
+    Each stage gets its own loss/gradient function, which lets the experiment
+    progressively relax a coarse objective into the full waveform objective.
+    """
+
+    model = model_init
+    history = []
+    snapshots = {0: jnp.array(model_init)}
+    global_step = 0
+
+    for stage_index, n_steps in enumerate(stage_steps):
+        if n_steps <= 0:
+            continue
+
+        loss_grad_fn = make_loss_grad_fn(stage_index)
+        optimiser = optimiser_factory()
+        state = optimiser.init(model)
+
+        for _ in range(n_steps):
+            loss_value, grad = loss_grad_fn(model)
+            updates, state = optimiser.update(grad, state, model)
+            model = optax.apply_updates(model, updates)
+            model = _project_velocity(model, bounds)
+
+            metrics = _step_metrics(global_step, model, loss_value, true_model)
+            metrics["stage"] = float(stage_index)
+            history.append(metrics)
+
+            global_step += 1
+            if global_step in snapshot_steps:
+                snapshots[global_step] = jnp.array(model)
+
+    final_loss, _ = make_loss_grad_fn(max(len(stage_steps) - 1, 0))(model)
+    return model, history, float(jnp.asarray(final_loss).reshape(())), snapshots
