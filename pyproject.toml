@@ -15,13 +15,11 @@ dependencies = [
 "optax",
 "numpy",
 "scipy",
-"matplotlib"
+"matplotlib",
+"h5py"
 ]
 
 [project.optional-dependencies]
-fwi = [
-    "h5py"
-]
 devito = [
     "devito"
 ]
