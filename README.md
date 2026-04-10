@@ -132,6 +132,8 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * scalar metrics in JSON
 * optimisation history in JSON
 
+The core implementation lives directly under `src/fwi/` so imports stay short and explicit, for example `from fwi.problem import init_params`.
+
 ## 👤 Author
 
 Francesco Giuseppe Remondi
