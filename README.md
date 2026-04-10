@@ -30,16 +30,28 @@ The approach combines:
 
 ## 📂 Repository Structure (Planned)
 
-```
+```text
 src/            # Core implementation (FWI, optimisers, models)
-experiments/    # Experiment scripts and configurations
+experiments/    # Experiment scripts, outputs, and configurations
 notebooks/      # Exploratory analysis and visualisations
-data/           # Synthetic datasets (if included)
+data/           # Synthetic datasets and small cached artefacts
+resources/      # Local reference material (ignored by git)
+tests/          # Smoke tests for the baseline implementation
 ```
 
 ## 🚧 Status
 
 This project is currently in early development.
+
+Phase 1 now includes a runnable baseline for a synthetic brain-imaging FWI problem:
+
+* A differentiable 2D acoustic wave solver implemented directly in JAX
+* Stride-inspired elliptical acquisition geometry for brain ultrasound
+* A procedural brain phantom with skull, ventricles, and lesion structure
+* Classical optimisation baselines using SGD, Adam, and L-BFGS-B
+* Basic evaluation metrics for model and data misfit
+
+The repository also contains local reference resources from Stride and Descend under `resources/`. Those files are currently used as design references rather than imported runtime dependencies.
 
 ## 🚀 Research Roadmap
 
@@ -50,6 +62,11 @@ The project will be developed progressively, starting from simple and interpreta
 * Implement differentiable FWI with forward and adjoint solvers
 * Optimisation using standard methods (SGD, Adam, L-BFGS)
 * Establish baseline performance and evaluation metrics
+
+Current implementation note:
+
+* The active baseline uses a JAX-native solver so the full forward and adjoint pipeline remains differentiable end to end.
+* A Devito-backed route is still relevant for future work, especially if we want a higher-fidelity solver that mirrors Stride more closely, but that will likely require a custom JAX wrapper rather than direct automatic differentiation through Stride itself.
 
 ### Phase 2 — Meta-Learned Scalar Optimisation
 
@@ -94,6 +111,26 @@ The project will be developed progressively, starting from simple and interpreta
 ## 🔗 Related Work
 
 - Descend (Moseley et al., 2024): https://gitlab.com/benmoseley/descend-pmlr-2024
+
+## ▶️ Running The Phase 1 Baseline
+
+The baseline experiment entrypoint is:
+
+```bash
+PYTHONPATH=src python experiments/phase1_brain_fwi.py --optimizer adam --steps 20
+```
+
+Useful options include:
+
+* `--optimizer {sgd,adam,lbfgsb}`
+* `--nx`, `--ny`, `--nt` to change grid and recording sizes
+* `--n-transducers`, `--n-shots` to adjust acquisition cost
+
+Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
+
+* reconstruction plots
+* scalar metrics in JSON
+* optimisation history in JSON
 
 ## 👤 Author
 
