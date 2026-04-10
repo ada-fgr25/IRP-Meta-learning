@@ -15,15 +15,19 @@ dependencies = [
 "optax",
 "numpy",
 "scipy",
-"matplotlib"
+"matplotlib",
+"h5py"
 ]
 
 [project.optional-dependencies]
+devito = [
+    "devito"
+]
 stride = [
     "stride @ git+https://github.com/trustimaging/stride.git"
 ]
 dev = [
-"black",
+"black==25.1.0",
 "ruff",
 "pytest"
 ]
@@ -31,6 +35,12 @@ dev = [
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 # -------------------------
 

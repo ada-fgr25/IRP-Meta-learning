@@ -209,3 +209,6 @@ __marimo__/
 
 # Initial Resources
 resources/
+
+# Generated experiment artefacts
+experiments/outputs/

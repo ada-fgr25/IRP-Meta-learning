@@ -5,6 +5,7 @@ optax>=0.2.0
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
+h5py>=3.0
 pytest
-black
+black==25.1.0
 ruff
