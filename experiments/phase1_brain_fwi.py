@@ -182,6 +182,9 @@ def main():
     metrics["model_source"] = config.model.source
     metrics["continuation_radii"] = list(continuation_radii)
     metrics["stage_steps"] = list(stage_steps)
+    metrics["initial_model_rmse"] = float(jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2)))
+    metrics["rmse_improvement"] = metrics["initial_model_rmse"] - metrics["model_rmse"]
+    metrics["update_l2_norm"] = float(jax.numpy.linalg.norm(x_hat - x0))
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
