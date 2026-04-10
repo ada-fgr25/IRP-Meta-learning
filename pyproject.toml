@@ -11,6 +11,8 @@ requires-python = ">=3.10"
 dependencies = [
 "jax",
 "jaxlib",
+"equinox",
+"optax",
 "numpy",
 "scipy",
 "matplotlib"
