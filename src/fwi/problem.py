@@ -19,7 +19,9 @@ from .config import BrainFWIConfig
 from .phantoms import build_initial_velocity, build_true_brain_velocity
 
 
-def _load_stride_field(path: str, downsample: int) -> tuple[jnp.ndarray, tuple[float, float]]:
+def _load_stride_field(
+    path: str, downsample: int
+) -> tuple[jnp.ndarray, tuple[float, float]]:
     """Load and optionally downsample a Stride HDF5 scalar field.
 
     The Stride example stores both the grid spacing and the model samples in the
@@ -39,7 +41,9 @@ def _load_stride_field(path: str, downsample: int) -> tuple[jnp.ndarray, tuple[f
     return jnp.asarray(data), spacing
 
 
-def _initialise_models(config: BrainFWIConfig) -> tuple[BrainFWIConfig, jnp.ndarray, jnp.ndarray]:
+def _initialise_models(
+    config: BrainFWIConfig,
+) -> tuple[BrainFWIConfig, jnp.ndarray, jnp.ndarray]:
     """Build the true and starting models for the selected data source."""
 
     if config.model.source == "procedural":

@@ -25,10 +25,7 @@ def _ellipse_mask(
 ) -> jnp.ndarray:
     """Return a soft binary mask for an ellipse embedded in the grid."""
 
-    return (
-        ((xx - centre_x) / radius_x) ** 2 + ((yy - centre_y) / radius_y) ** 2
-        <= 1.0
-    )
+    return ((xx - centre_x) / radius_x) ** 2 + ((yy - centre_y) / radius_y) ** 2 <= 1.0
 
 
 def build_true_brain_velocity(config: BrainFWIConfig) -> jnp.ndarray:
@@ -56,7 +53,9 @@ def build_true_brain_velocity(config: BrainFWIConfig) -> jnp.ndarray:
     vent_left = _ellipse_mask(xx, yy, -0.12, 0.05, 0.08, 0.12)
     vent_right = _ellipse_mask(xx, yy, 0.12, 0.05, 0.08, 0.12)
     lesion = _ellipse_mask(xx, yy, 0.18, -0.22, 0.12, 0.10)
-    velocity = jnp.where(vent_left | vent_right, model_cfg.brain_velocity - 60.0, velocity)
+    velocity = jnp.where(
+        vent_left | vent_right, model_cfg.brain_velocity - 60.0, velocity
+    )
     velocity = jnp.where(lesion, model_cfg.lesion_velocity, velocity)
 
     return velocity

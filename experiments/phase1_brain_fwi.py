@@ -44,7 +44,9 @@ def parse_args():
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--optimizer", choices=["sgd", "adam", "lbfgsb"], default="adam")
+    parser.add_argument(
+        "--optimizer", choices=["sgd", "adam", "lbfgsb"], default="adam"
+    )
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=5.0)
     parser.add_argument("--nx", type=int, default=96)
@@ -137,7 +139,9 @@ def main():
     x0, auxs, x_exact = params["x0"], (params["y_obs"],), params["x_exact"]
     bounds = (config.model.min_velocity, config.model.max_velocity)
 
-    filtered_obs = tuple(smooth_traces(auxs[0], radius) for radius in continuation_radii)
+    filtered_obs = tuple(
+        smooth_traces(auxs[0], radius) for radius in continuation_radii
+    )
 
     def make_loss_grad_fn(stage_index: int):
         stage_auxs = (filtered_obs[stage_index],)
@@ -178,11 +182,15 @@ def main():
     metrics["steps"] = args.steps
     metrics["n_transducers"] = config.acquisition.n_transducers
     metrics["n_shots"] = config.acquisition.n_shots
-    metrics["n_receivers_per_shot"] = int(params["geometry"]["transducer_indices"].shape[0])
+    metrics["n_receivers_per_shot"] = int(
+        params["geometry"]["transducer_indices"].shape[0]
+    )
     metrics["model_source"] = config.model.source
     metrics["continuation_radii"] = list(continuation_radii)
     metrics["stage_steps"] = list(stage_steps)
-    metrics["initial_model_rmse"] = float(jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2)))
+    metrics["initial_model_rmse"] = float(
+        jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
+    )
     metrics["rmse_improvement"] = metrics["initial_model_rmse"] - metrics["model_rmse"]
     metrics["update_l2_norm"] = float(jax.numpy.linalg.norm(x_hat - x0))
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"

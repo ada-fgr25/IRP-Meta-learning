@@ -28,7 +28,7 @@ def _ricker_wavelet(nt: int, dt: float, frequency_hz: float) -> jnp.ndarray:
     t = jnp.arange(nt) * dt
     t0 = 1.5 / frequency_hz
     arg = jnp.pi * frequency_hz * (t - t0)
-    return (1.0 - 2.0 * arg**2) * jnp.exp(-arg**2)
+    return (1.0 - 2.0 * arg**2) * jnp.exp(-(arg**2))
 
 
 def _select_shot_indices(n_transducers: int, n_shots: int) -> jnp.ndarray:
@@ -100,10 +100,9 @@ def _laplacian(field: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
     """
 
     centre = field[1:-1, 1:-1]
-    lap = (
-        (field[2:, 1:-1] - 2.0 * centre + field[:-2, 1:-1]) / dx**2
-        + (field[1:-1, 2:] - 2.0 * centre + field[1:-1, :-2]) / dy**2
-    )
+    lap = (field[2:, 1:-1] - 2.0 * centre + field[:-2, 1:-1]) / dx**2 + (
+        field[1:-1, 2:] - 2.0 * centre + field[1:-1, :-2]
+    ) / dy**2
     return jnp.pad(lap, ((1, 1), (1, 1)))
 
 
