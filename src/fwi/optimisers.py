@@ -9,7 +9,6 @@ import numpy as np
 import optax
 from scipy import optimize
 
-
 Array = jnp.ndarray
 LossFn = Callable[[Array], Array]
 
