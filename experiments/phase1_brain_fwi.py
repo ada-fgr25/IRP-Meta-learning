@@ -115,6 +115,13 @@ def _shared_limits(images):
     return vmin, vmax
 
 
+def _symmetric_limits(images):
+    """Return a symmetric color scale for signed difference images."""
+
+    vmax = max(float(jax.numpy.max(jax.numpy.abs(image))) for image in images)
+    return -vmax, vmax
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -183,19 +190,34 @@ def main():
     for step in checkpoint_steps:
         image = snapshots.get(step, x_hat if step >= args.steps else x0)
         panels.append((f"Step {step}", image))
+    diff_panels = [
+        ("Step 20 - Step 0", snapshots.get(20, x_hat) - snapshots.get(0, x0)),
+        ("True - Step 20", x_exact - snapshots.get(20, x_hat)),
+    ]
 
     absolute_images = [image for _, image in panels]
     abs_vmin, abs_vmax = _shared_limits(absolute_images)
+    diff_vmin, diff_vmax = _symmetric_limits([image for _, image in diff_panels])
 
-    figure = plt.figure(figsize=(4 * len(panels), 4))
-    axes = figure.subplots(1, len(panels))
-    for ax, (title, image) in zip(axes, panels):
+    figure = plt.figure(figsize=(4 * (len(panels) + len(diff_panels)), 4))
+    axes = figure.subplots(1, len(panels) + len(diff_panels))
+    for ax, (title, image) in zip(axes[: len(panels)], panels):
         im = ax.imshow(
             image.T,
             origin="lower",
             cmap="viridis",
             vmin=abs_vmin,
             vmax=abs_vmax,
+        )
+        figure.colorbar(im, ax=ax)
+        ax.set_title(title)
+    for ax, (title, image) in zip(axes[len(panels) :], diff_panels):
+        im = ax.imshow(
+            image.T,
+            origin="lower",
+            cmap="coolwarm",
+            vmin=diff_vmin,
+            vmax=diff_vmax,
         )
         figure.colorbar(im, ax=ax)
         ax.set_title(title)
