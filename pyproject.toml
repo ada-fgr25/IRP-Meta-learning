@@ -19,6 +19,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fwi = [
+    "h5py"
+]
+devito = [
+    "devito"
+]
 stride = [
     "stride @ git+https://github.com/trustimaging/stride.git"
 ]
@@ -31,6 +37,12 @@ dev = [
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 # -------------------------
 
