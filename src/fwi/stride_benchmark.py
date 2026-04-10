@@ -27,7 +27,7 @@ import sys
 class StrideBenchmarkLayout:
     """Describe the local directory layout of the bundled Stride benchmark."""
 
-    resource_dir: Path = Path("resources/stride_fwi_brain")
+    resource_dir: Path = Path("experiments/stride_brain_reference")
     forward_script: str = "01_script_forward.py"
     inverse_script: str = "02_script_inverse.py"
 
@@ -60,7 +60,7 @@ class StrideBenchmarkLayout:
 
 @dataclass(frozen=True)
 class StrideBenchmarkRunner:
-    """Run the local Stride forward and inverse reference scripts.
+    """Run the tracked Stride forward and inverse reference scripts.
 
     The runner assumes the Stride scripts should execute from inside their own
     resource directory because they reference local `data/` files with relative
@@ -129,7 +129,7 @@ class StrideBenchmarkRunner:
         """Describe the benchmark settings encoded in the bundled scripts.
 
         These values are intentionally documented here because the wrapper does
-        not reimplement the benchmark itself; it launches the local Stride
+        not reimplement the benchmark itself; it launches the tracked Stride
         scripts verbatim. Making the expected settings explicit helps other
         researchers understand what they are reproducing when they use this
         wrapper with the default resource directory.

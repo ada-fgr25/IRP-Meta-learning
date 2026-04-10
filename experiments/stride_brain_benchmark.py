@@ -2,8 +2,8 @@
 
 This entrypoint is intentionally separate from the differentiable JAX
 experiment. The JAX path remains the research path for meta-learning, while
-this script acts as a convenience wrapper around the local Stride reference
-implementation shipped under `resources/stride_fwi_brain`.
+this script acts as a convenience wrapper around the tracked Stride reference
+implementation shipped under `experiments/stride_brain_reference`.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ def parse_args():
     parser.add_argument(
         "--resource-dir",
         type=Path,
-        default=Path("resources/stride_fwi_brain"),
-        help="Directory containing the local Stride reference scripts and data.",
+        default=Path("experiments/stride_brain_reference"),
+        help="Directory containing the tracked Stride reference scripts.",
     )
     parser.add_argument(
         "--python",

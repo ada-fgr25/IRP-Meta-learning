@@ -19,6 +19,10 @@ class StrideBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(runner.forward_command(), ["python", "01_script_forward.py"])
         self.assertEqual(runner.inverse_command(), ["python", "02_script_inverse.py"])
+        self.assertEqual(
+            runner.layout.resource_dir,
+            Path("experiments/stride_brain_reference"),
+        )
 
     def test_runner_lists_zero_padded_velocity_snapshots_in_order(self):
         """Snapshot discovery should preserve the benchmark iteration order."""
