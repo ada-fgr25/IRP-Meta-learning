@@ -49,8 +49,8 @@ def parse_args():
     parser.add_argument("--nx", type=int, default=96)
     parser.add_argument("--ny", type=int, default=72)
     parser.add_argument("--nt", type=int, default=320)
-    parser.add_argument("--n-transducers", type=int, default=24)
-    parser.add_argument("--n-shots", type=int, default=6)
+    parser.add_argument("--n-transducers", type=int, default=48)
+    parser.add_argument("--n-shots", type=int, default=24)
     parser.add_argument(
         "--output-dir",
         type=Path,

@@ -44,11 +44,13 @@ class AcquisitionConfig:
 
     The transducers sit on an ellipse around the head to mimic the broad shape
     of the Stride brain-ultrasound example. `n_shots` selects a subset of those
-    transducers as emitters so the baseline stays computationally manageable.
+    transducers as emitters. We now default to a denser survey than the first
+    prototype because sparse illumination made the internal anomalies almost
+    invisible to the optimiser.
     """
 
-    n_transducers: int = 24
-    n_shots: int = 6
+    n_transducers: int = 48
+    n_shots: int = 24
     ellipse_scale_x: float = 0.90
     ellipse_scale_y: float = 0.85
     source_frequency_hz: float = 2.5e5
