@@ -31,6 +31,27 @@ def _ricker_wavelet(nt: int, dt: float, frequency_hz: float) -> jnp.ndarray:
     return (1.0 - 2.0 * arg**2) * jnp.exp(-arg**2)
 
 
+def _select_shot_indices(n_transducers: int, n_shots: int) -> jnp.ndarray:
+    """Choose an evenly spaced, unique subset of transmitters.
+
+    The first prototype used a direct `linspace(..., dtype=int)` call, which is
+    concise but can become awkward when `n_shots` approaches `n_transducers`.
+    This helper makes the intent explicit and prevents duplicate indices.
+    """
+
+    if n_transducers <= 0:
+        raise ValueError("`n_transducers` must be positive.")
+    if n_shots <= 0:
+        raise ValueError("`n_shots` must be positive.")
+
+    capped_n_shots = min(n_shots, n_transducers)
+    shot_positions = (
+        jnp.arange(capped_n_shots, dtype=jnp.float32) * n_transducers / capped_n_shots
+    )
+    shot_indices = jnp.floor(shot_positions).astype(jnp.int32)
+    return shot_indices
+
+
 def build_geometry(config: BrainFWIConfig) -> dict[str, jnp.ndarray]:
     """Create an elliptical transducer ring inspired by the Stride brain setup.
 
@@ -57,9 +78,9 @@ def build_geometry(config: BrainFWIConfig) -> dict[str, jnp.ndarray]:
     )
     indices = jnp.rint(coords).astype(jnp.int32)
 
-    # We use a fixed subset of transmitters to keep the baseline inexpensive.
-    # A denser acquisition can be tested later by simply increasing `n_shots`.
-    shot_indices = jnp.linspace(0, acq.n_transducers - 1, acq.n_shots, dtype=jnp.int32)
+    # We use a fixed subset of transmitters to keep the baseline inexpensive,
+    # but we make the selection explicit so denser surveys remain well defined.
+    shot_indices = _select_shot_indices(acq.n_transducers, acq.n_shots)
 
     return {
         "transducer_indices": indices,
