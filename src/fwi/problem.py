@@ -135,6 +135,29 @@ def loss(params, x, auxs):
     return jnp.mean((y - y_obs) ** 2).reshape((1,))
 
 
+def smooth_traces(traces: jnp.ndarray, radius: int) -> jnp.ndarray:
+    """Apply a simple low-pass smoothing along the time axis of each trace.
+
+    This is a lightweight stand-in for frequency continuation: large smoothing
+    radii suppress high-frequency waveform detail early in optimisation, and the
+    radius can then be reduced over stages until we recover the unsmoothed loss.
+    """
+
+    radius = int(radius)
+    if radius <= 0:
+        return traces
+
+    kernel = jnp.ones((2 * radius + 1,), dtype=traces.dtype) / (2 * radius + 1)
+
+    def smooth_trace(trace: jnp.ndarray) -> jnp.ndarray:
+        padded = jnp.pad(trace, (radius, radius), mode="edge")
+        return jnp.convolve(padded, kernel, mode="valid")
+
+    traces = jnp.swapaxes(traces, 1, 2)
+    traces = jax.vmap(jax.vmap(smooth_trace))(traces)
+    return jnp.swapaxes(traces, 1, 2)
+
+
 def dldx(params, x, auxs):
     """Return the loss value and gradient with respect to the velocity field.
 

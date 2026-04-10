@@ -14,7 +14,7 @@ from fwi.config import (
     ModelConfig,
     TimeConfig,
 )
-from fwi.problem import dldx, init_params
+from fwi.problem import dldx, init_params, smooth_traces
 
 
 def _tiny_config() -> BrainFWIConfig:
@@ -48,6 +48,16 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(loss_value.shape, (1,))
         self.assertEqual(grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+
+    def test_trace_smoothing_preserves_shape(self):
+        """Continuation smoothing should not change the survey tensor shape."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        y_obs = params["y_obs"]
+        y_smooth = smooth_traces(y_obs, radius=3)
+
+        self.assertEqual(y_smooth.shape, y_obs.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(y_smooth))))
 
 
 if __name__ == "__main__":
