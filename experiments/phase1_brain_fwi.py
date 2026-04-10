@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import jax
+import optax
 
 # Point Matplotlib at a writable cache directory to avoid noisy warnings in
 # constrained environments such as shared shells or remote workspaces.
@@ -30,8 +31,8 @@ from fwi.config import (
     TimeConfig,
 )
 from fwi.metrics import compute_metrics
-from fwi.optimisers import run_adam, run_lbfgsb, run_sgd
-from fwi.problem import dldx, init_params
+from fwi.optimisers import run_lbfgsb, run_stagewise_optax
+from fwi.problem import dldx, init_params, smooth_traces
 
 
 def parse_args():
@@ -51,6 +52,12 @@ def parse_args():
     parser.add_argument("--nt", type=int, default=320)
     parser.add_argument("--n-transducers", type=int, default=48)
     parser.add_argument("--n-shots", type=int, default=24)
+    parser.add_argument(
+        "--continuation-radii",
+        type=str,
+        default="12,6,0",
+        help="Comma-separated time-smoothing radii for coarse-to-fine continuation.",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -84,6 +91,22 @@ def build_config(args) -> BrainFWIConfig:
     )
 
 
+def _parse_continuation_radii(text: str) -> tuple[int, ...]:
+    """Parse a comma-separated continuation schedule."""
+
+    if not text.strip():
+        return (0,)
+    return tuple(int(part.strip()) for part in text.split(","))
+
+
+def _split_steps(total_steps: int, n_stages: int) -> tuple[int, ...]:
+    """Split a total iteration budget as evenly as possible across stages."""
+
+    base = total_steps // n_stages
+    remainder = total_steps % n_stages
+    return tuple(base + (1 if i < remainder else 0) for i in range(n_stages))
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -91,34 +114,40 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     config = build_config(args)
+    continuation_radii = _parse_continuation_radii(args.continuation_radii)
+    stage_steps = _split_steps(args.steps, len(continuation_radii))
     key = jax.random.PRNGKey(0)
     params = init_params(key, config=config, backend_name="jax")
     config = params["config"]
     x0, auxs, x_exact = params["x0"], (params["y_obs"],), params["x_exact"]
     bounds = (config.model.min_velocity, config.model.max_velocity)
 
-    # JIT the objective once so repeated optimiser calls stay reasonably fast.
-    loss_grad_fn = jax.jit(lambda model: dldx(params, model, auxs))
+    filtered_obs = tuple(smooth_traces(auxs[0], radius) for radius in continuation_radii)
+
+    def make_loss_grad_fn(stage_index: int):
+        stage_auxs = (filtered_obs[stage_index],)
+        return jax.jit(lambda model: dldx(params, model, stage_auxs))
 
     if args.optimizer == "sgd":
-        x_hat, history, final_loss, snapshots = run_sgd(
+        x_hat, history, final_loss, snapshots = run_stagewise_optax(
             x0,
-            loss_grad_fn,
-            learning_rate=args.learning_rate,
-            n_steps=args.steps,
-            bounds=bounds,
+            make_loss_grad_fn,
+            lambda: optax.sgd(learning_rate=args.learning_rate),
+            stage_steps,
+            bounds,
             true_model=x_exact,
         )
     elif args.optimizer == "adam":
-        x_hat, history, final_loss, snapshots = run_adam(
+        x_hat, history, final_loss, snapshots = run_stagewise_optax(
             x0,
-            loss_grad_fn,
-            learning_rate=args.learning_rate,
-            n_steps=args.steps,
-            bounds=bounds,
+            make_loss_grad_fn,
+            lambda: optax.adam(learning_rate=args.learning_rate),
+            stage_steps,
+            bounds,
             true_model=x_exact,
         )
     else:
+        loss_grad_fn = make_loss_grad_fn(len(continuation_radii) - 1)
         x_hat, history, final_loss, snapshots = run_lbfgsb(
             x0,
             loss_grad_fn,
@@ -136,6 +165,8 @@ def main():
     metrics["n_shots"] = config.acquisition.n_shots
     metrics["n_receivers_per_shot"] = int(params["geometry"]["transducer_indices"].shape[0])
     metrics["model_source"] = config.model.source
+    metrics["continuation_radii"] = list(continuation_radii)
+    metrics["stage_steps"] = list(stage_steps)
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
@@ -166,6 +197,7 @@ def main():
         f"{config.acquisition.n_shots} shots, "
         f"{config.acquisition.n_transducers} transducers"
     )
+    print(f"Continuation radii: {continuation_radii}")
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved metrics to: {metrics_path}")
     print(f"Saved optimisation history to: {history_path}")
