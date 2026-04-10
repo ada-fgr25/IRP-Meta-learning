@@ -177,6 +177,7 @@ def main():
 
     y_hat = simulate_survey(x_hat, params["geometry"], config)
     metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
+    metrics["backend"] = "jax"
     metrics["final_loss"] = final_loss
     metrics["optimizer"] = args.optimizer
     metrics["steps"] = args.steps

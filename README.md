@@ -50,6 +50,8 @@ Phase 1 now includes a runnable baseline for a synthetic brain-imaging FWI probl
 * A procedural brain phantom with skull, ventricles, and lesion structure
 * Classical optimisation baselines using SGD, Adam, and L-BFGS-B
 * Basic evaluation metrics for model and data misfit
+* A lightweight wrapper for the bundled Stride scripts so the reference brain
+  example can be run as a benchmark outside the differentiable JAX path
 
 The repository also contains local reference resources from Stride and Descend under `resources/`. Those files are currently used as design references rather than imported runtime dependencies.
 
@@ -66,7 +68,8 @@ The project will be developed progressively, starting from simple and interpreta
 Current implementation note:
 
 * The active baseline uses a JAX-native solver so the full forward and adjoint pipeline remains differentiable end to end.
-* A Devito-backed route is still relevant for future work, especially if we want a higher-fidelity solver that mirrors Stride more closely, but that will likely require a custom JAX wrapper rather than direct automatic differentiation through Stride itself.
+* The JAX baseline is the research path for differentiable optimisation and future meta-learning experiments.
+* The local Stride scripts under `resources/stride_fwi_brain/` are treated separately as a benchmark path rather than part of the end-to-end autodiff stack.
 
 ### Phase 2 — Meta-Learned Scalar Optimisation
 
@@ -120,6 +123,9 @@ The baseline experiment entrypoint is:
 PYTHONPATH=src python experiments/phase1_brain_fwi.py --optimizer adam --steps 20
 ```
 
+This experiment is intentionally JAX-only so the optimisation path remains
+fully differentiable.
+
 Useful options include:
 
 * `--optimizer {sgd,adam,lbfgsb}`
@@ -133,6 +139,25 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * optimisation history in JSON
 
 The core implementation lives directly under `src/fwi/` so imports stay short and explicit, for example `from fwi.problem import init_params`.
+
+## ▶️ Running The Stride Benchmark
+
+The bundled Stride benchmark wrapper lives at:
+
+```bash
+PYTHONPATH=src python experiments/stride_brain_benchmark.py --mode both
+```
+
+Useful options include:
+
+* `--mode {forward,inverse,both}` to choose which bundled Stride script to run
+* `--resource-dir` to point at a different local Stride resource directory
+* `--python` to select the interpreter used to launch the Stride scripts
+* `--dry-run` to print the commands without executing them
+
+This wrapper simply orchestrates the reference scripts already stored under
+`resources/stride_fwi_brain/`. It is intended for benchmarking and qualitative
+comparison, not for differentiable meta-learning.
 
 ## 👤 Author
 
