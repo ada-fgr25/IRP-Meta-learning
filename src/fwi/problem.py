@@ -24,7 +24,9 @@ def _load_stride_field(path: str, downsample: int) -> tuple[jnp.ndarray, tuple[f
 
     The Stride example stores both the grid spacing and the model samples in the
     file. We preserve that metadata here so the JAX solver sees a geometry that
-    matches the loaded model rather than the old hard-coded toy grid.
+    matches the loaded model rather than the old hard-coded toy grid. The
+    default experiment path now uses the native Stride resolution, and this
+    downsampling hook is only retained as an escape hatch for cheaper debugging.
     """
 
     with h5py.File(path, "r") as handle:

@@ -73,7 +73,7 @@ class ModelConfig:
     source: str = "stride"
     true_model_path: str = "data/alpha2D-TrueModel.h5"
     starting_model_path: str = "data/alpha2D-StartingModel.h5"
-    stride_downsample: int = 5
+    stride_downsample: int = 1
     background_velocity: float = 1500.0
     brain_velocity: float = 1560.0
     skull_velocity: float = 2400.0
