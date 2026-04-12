@@ -53,8 +53,7 @@ class StrideBenchmarkLayout:
         for script_path in (self.forward_script_path(), self.inverse_script_path()):
             if not script_path.exists():
                 raise FileNotFoundError(
-                    "Expected Stride benchmark script not found at "
-                    f"{script_path!s}."
+                    "Expected Stride benchmark script not found at " f"{script_path!s}."
                 )
 
 
