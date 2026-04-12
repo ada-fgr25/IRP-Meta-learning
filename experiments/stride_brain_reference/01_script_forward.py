@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from stride import *
+import stride
 from stride.utils import wavelets
 
 
@@ -26,7 +26,7 @@ async def main(runtime):
     absorbing = (40, 40)
     spacing = (0.5e-3, 0.5e-3)
 
-    space = Space(
+    space = stride.Space(
         shape=shape,
         extra=extra,
         absorbing=absorbing,
@@ -37,10 +37,10 @@ async def main(runtime):
     step = 0.08e-6
     num = 2500
 
-    time = Time(start=start, step=step, num=num)
-    problem = Problem(name="alpha2D", space=space, time=time)
+    time = stride.Time(start=start, step=step, num=num)
+    problem = stride.Problem(name="alpha2D", space=space, time=time)
 
-    vp = ScalarField(name="vp", grid=problem.grid)
+    vp = stride.ScalarField(name="vp", grid=problem.grid)
     vp.load(str(TRUE_MODEL_PATH))
     problem.medium.add(vp)
 
@@ -60,8 +60,11 @@ async def main(runtime):
         )
 
     problem.plot()
-    pde = IsoAcousticDevito.remote(grid=problem.grid, len=runtime.num_workers)
-    await forward(
+    pde = stride.IsoAcousticDevito.remote(
+        grid=problem.grid,
+        len=runtime.num_workers,
+    )
+    await stride.forward(
         problem,
         pde,
         vp,
@@ -73,4 +76,4 @@ async def main(runtime):
 
 
 if __name__ == "__main__":
-    mosaic.run(main)
+    stride.mosaic.run(main)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stride import *
+import stride
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +28,7 @@ async def main(runtime):
     absorbing = (40, 40)
     spacing = (0.5e-3, 0.5e-3)
 
-    space = Space(
+    space = stride.Space(
         shape=shape,
         extra=extra,
         absorbing=absorbing,
@@ -39,10 +39,14 @@ async def main(runtime):
     step = 0.08e-6
     num = 2500
 
-    time = Time(start=start, step=step, num=num)
-    problem = Problem(name="alpha2D", space=space, time=time)
+    time = stride.Time(start=start, step=step, num=num)
+    problem = stride.Problem(name="alpha2D", space=space, time=time)
 
-    vp = ScalarField.parameter(name="vp", grid=problem.grid, needs_grad=True)
+    vp = stride.ScalarField.parameter(
+        name="vp",
+        grid=problem.grid,
+        needs_grad=True,
+    )
     vp.load(str(STARTING_MODEL_PATH))
     problem.medium.add(vp)
 
@@ -57,27 +61,30 @@ async def main(runtime):
 
     problem.plot()
 
-    pde = IsoAcousticDevito.remote(grid=problem.grid, len=runtime.num_workers)
-    loss = L2DistanceLoss.remote(len=runtime.num_workers)
+    pde = stride.IsoAcousticDevito.remote(
+        grid=problem.grid,
+        len=runtime.num_workers,
+    )
+    loss = stride.L2DistanceLoss.remote(len=runtime.num_workers)
 
     step_size = 5
-    process_grad = ProcessGlobalGradient()
-    process_model = ProcessModelIteration(min=1450.0, max=3000.0)
-    optimiser = GradientDescent(
+    process_grad = stride.ProcessGlobalGradient()
+    process_model = stride.ProcessModelIteration(min=1450.0, max=3000.0)
+    optimiser = stride.GradientDescent(
         vp,
         step_size=step_size,
         process_grad=process_grad,
         process_model=process_model,
     )
 
-    optimisation_loop = OptimisationLoop()
+    optimisation_loop = stride.OptimisationLoop()
     max_freqs = [0.1e6, 0.2e6, 0.3e6]
     num_blocks = len(max_freqs)
     num_iters = 8
     num_shots_per_iter = 32
 
     for block, freq in optimisation_loop.blocks(num_blocks, max_freqs):
-        await adjoint(
+        await stride.adjoint(
             problem,
             pde,
             loss,
@@ -97,4 +104,4 @@ async def main(runtime):
 
 
 if __name__ == "__main__":
-    mosaic.run(main)
+    stride.mosaic.run(main)
