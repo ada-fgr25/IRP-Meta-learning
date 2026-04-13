@@ -7,6 +7,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
+from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
@@ -14,7 +15,13 @@ from fwi.config import (
     ModelConfig,
     TimeConfig,
 )
-from fwi.problem import build_brain_fwi_problem, dldx, init_params, smooth_traces
+from fwi.problem import (
+    build_brain_fwi_problem,
+    dldx,
+    forward,
+    init_params,
+    smooth_traces,
+)
 
 
 def _tiny_config() -> BrainFWIConfig:
@@ -50,6 +57,47 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(loss_value.shape, (1,))
         self.assertEqual(grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+
+    def test_explicit_adjoint_matches_autodiff_gradient(self):
+        """The explicit adjoint should agree with a direct autodiff reference."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        auxs = (params["y_obs"],)
+        backend = build_backend("jax")
+
+        explicit_value, explicit_grad = backend.loss_grad(params, params["x0"], auxs)
+        autodiff_value, autodiff_grad = jax.value_and_grad(
+            lambda model: jnp.sum((forward(params, model) - auxs[0]) ** 2)
+            / auxs[0].size
+        )(params["x0"])
+
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    explicit_value.squeeze(),
+                    autodiff_value,
+                    rtol=1.0e-4,
+                    atol=1.0e-6,
+                )
+            )
+        )
+        self.assertTrue(
+            bool(jnp.allclose(explicit_grad, autodiff_grad, rtol=5.0e-3, atol=5.0e-4))
+        )
+
+    def test_explicit_adjoint_supports_higher_order_differentiation(self):
+        """Meta-gradients should stay available through the explicit adjoint."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        backend = build_backend("jax")
+
+        def squared_grad_norm(model):
+            _, grad = backend.loss_grad(params, model, (params["y_obs"],))
+            return jnp.sum(grad**2)
+
+        meta_grad = jax.grad(squared_grad_norm)(params["x0"])
+        self.assertEqual(meta_grad.shape, params["x0"].shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(meta_grad))))
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""
