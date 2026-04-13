@@ -1,12 +1,8 @@
 """Differentiable 2D acoustic wave propagation in JAX.
 
-The implementation here is intentionally simple:
-- second-order finite differences in space
-- an explicit second-order update in time
-- a lightweight damping frame at the boundary
-
-That keeps the entire forward solve differentiable under JAX so the adjoint
-needed for FWI comes from automatic differentiation of the time-stepping loop.
+This module focuses on the time-domain solver itself. Acquisition construction
+now lives in :mod:`fwi.acquisition` so both the JAX and Stride workflows can
+share one experiment-facing acquisition API.
 """
 
 from __future__ import annotations
@@ -14,82 +10,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from .acquisition import AcquisitionGeometry
 from .config import BrainFWIConfig
-
-
-def _ricker_wavelet(nt: int, dt: float, frequency_hz: float) -> jnp.ndarray:
-    """Generate a compact source pulse for ultrasound transmission.
-
-    A Ricker wavelet is a standard simple source model in seismic and acoustic
-    inversion. It is not a perfect description of a medical transducer, but it
-    gives us a clean band-limited pulse for a baseline experiment.
-    """
-
-    t = jnp.arange(nt) * dt
-    t0 = 1.5 / frequency_hz
-    arg = jnp.pi * frequency_hz * (t - t0)
-    return (1.0 - 2.0 * arg**2) * jnp.exp(-(arg**2))
-
-
-def _select_shot_indices(n_transducers: int, n_shots: int) -> jnp.ndarray:
-    """Choose an evenly spaced, unique subset of transmitters.
-
-    The first prototype used a direct `linspace(..., dtype=int)` call, which is
-    concise but can become awkward when `n_shots` approaches `n_transducers`.
-    This helper makes the intent explicit and prevents duplicate indices.
-    """
-
-    if n_transducers <= 0:
-        raise ValueError("`n_transducers` must be positive.")
-    if n_shots <= 0:
-        raise ValueError("`n_shots` must be positive.")
-
-    capped_n_shots = min(n_shots, n_transducers)
-    shot_positions = (
-        jnp.arange(capped_n_shots, dtype=jnp.float32) * n_transducers / capped_n_shots
-    )
-    shot_indices = jnp.floor(shot_positions).astype(jnp.int32)
-    return shot_indices
-
-
-def build_geometry(config: BrainFWIConfig) -> dict[str, jnp.ndarray]:
-    """Create an elliptical transducer ring inspired by the Stride brain setup.
-
-    Returns integer grid indices for all transducers, the subset used as
-    transmitters, and the source wavelet shared across shots.
-    """
-
-    grid = config.grid
-    acq = config.acquisition
-    angles = jnp.linspace(0.0, 2.0 * jnp.pi, acq.n_transducers, endpoint=False)
-    centre = jnp.array([(grid.nx - 1) / 2.0, (grid.ny - 1) / 2.0])
-    radius = jnp.array(
-        [
-            acq.ellipse_scale_x * (grid.nx - 1) / 2.0,
-            acq.ellipse_scale_y * (grid.ny - 1) / 2.0,
-        ]
-    )
-    coords = jnp.stack(
-        [
-            centre[0] + radius[0] * jnp.cos(angles),
-            centre[1] + radius[1] * jnp.sin(angles),
-        ],
-        axis=-1,
-    )
-    indices = jnp.rint(coords).astype(jnp.int32)
-
-    # We use a fixed subset of transmitters to keep the baseline inexpensive,
-    # but we make the selection explicit so denser surveys remain well defined.
-    shot_indices = _select_shot_indices(acq.n_transducers, acq.n_shots)
-
-    return {
-        "transducer_indices": indices,
-        "shot_indices": shot_indices,
-        "source_wavelet": _ricker_wavelet(
-            config.time.nt, config.time.dt, acq.source_frequency_hz
-        )
-        * acq.source_amplitude,
-    }
 
 
 def _laplacian(field: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
@@ -128,7 +50,7 @@ def _build_damping_mask(config: BrainFWIConfig) -> jnp.ndarray:
 
 def simulate_shot(
     velocity: jnp.ndarray,
-    geometry: dict[str, jnp.ndarray],
+    acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
     shot_index: jnp.ndarray,
 ) -> jnp.ndarray:
@@ -142,9 +64,8 @@ def simulate_shot(
     dt = config.time.dt
     dx = config.grid.dx
     dy = config.grid.dy
-    receivers = geometry["transducer_indices"]
+    receivers, _, wavelet = acquisition.require_solver_arrays()
     source = receivers[shot_index]
-    wavelet = geometry["source_wavelet"]
     damping = _build_damping_mask(config)
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
@@ -182,7 +103,7 @@ def simulate_shot(
 
 def simulate_survey(
     velocity: jnp.ndarray,
-    geometry: dict[str, jnp.ndarray],
+    acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
 ) -> jnp.ndarray:
     """Simulate all configured shots in the acquisition.
@@ -192,5 +113,5 @@ def simulate_survey(
     """
 
     return jax.vmap(
-        lambda shot_idx: simulate_shot(velocity, geometry, config, shot_idx)
-    )(geometry["shot_indices"])
+        lambda shot_idx: simulate_shot(velocity, acquisition, config, shot_idx)
+    )(acquisition.require_solver_arrays()[1])

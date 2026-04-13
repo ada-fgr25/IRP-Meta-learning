@@ -12,7 +12,6 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 
-from .acoustics import build_geometry
 from .backends import build_backend
 from .config import BrainFWIConfig
 from .phantoms import build_initial_velocity, build_true_brain_velocity
@@ -90,13 +89,14 @@ def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "
     del key
     config = config or BrainFWIConfig()
     config, x_exact, x0 = _initialise_models(config)
-    geometry = build_geometry(config)
     backend = build_backend(backend_name)
-    y_obs = backend.forward(x_exact, geometry, config)
+    acquisition = backend.build_acquisition(config)
+    y_obs = backend.forward(x_exact, acquisition, config)
 
     return {
         "config": config,
-        "geometry": geometry,
+        "acquisition": acquisition,
+        "geometry": acquisition,
         "backend_name": backend_name,
         "x0": x0,
         "x_exact": x_exact,
@@ -126,7 +126,7 @@ def forward(params, x):
     """
 
     backend = build_backend(params["backend_name"])
-    return backend.forward(x, params["geometry"], params["config"])
+    return backend.forward(x, params["acquisition"], params["config"])
 
 
 def loss(params, x, auxs):

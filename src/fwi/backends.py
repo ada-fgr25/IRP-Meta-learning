@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .acquisition import AcquisitionGeometry, build_elliptical_acquisition
 from .acoustics import simulate_survey
 
 
@@ -13,8 +14,13 @@ class JaxBackend:
 
     name: str = "jax"
 
-    def forward(self, velocity, geometry, config):
-        return simulate_survey(velocity, geometry, config)
+    def build_acquisition(self, config) -> AcquisitionGeometry:
+        """Construct the shared acquisition object from the Python config."""
+
+        return build_elliptical_acquisition(config)
+
+    def forward(self, velocity, acquisition, config):
+        return simulate_survey(velocity, acquisition, config)
 
 
 @dataclass(frozen=True)

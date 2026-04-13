@@ -38,6 +38,8 @@ class Phase1BrainFWITests(unittest.TestCase):
         y_obs = params["y_obs"]
 
         self.assertEqual(y_obs.shape, (3, 40, 12))
+        self.assertEqual(params["acquisition"].n_shots, 3)
+        self.assertEqual(params["acquisition"].n_receivers, 12)
 
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""

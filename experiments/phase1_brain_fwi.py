@@ -175,7 +175,7 @@ def main():
             true_model=x_exact,
         )
 
-    y_hat = simulate_survey(x_hat, params["geometry"], config)
+    y_hat = simulate_survey(x_hat, params["acquisition"], config)
     metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
     metrics["backend"] = "jax"
     metrics["final_loss"] = final_loss
@@ -184,7 +184,7 @@ def main():
     metrics["n_transducers"] = config.acquisition.n_transducers
     metrics["n_shots"] = config.acquisition.n_shots
     metrics["n_receivers_per_shot"] = int(
-        params["geometry"]["transducer_indices"].shape[0]
+        params["acquisition"].n_receivers
     )
     metrics["model_source"] = config.model.source
     metrics["continuation_radii"] = list(continuation_radii)
