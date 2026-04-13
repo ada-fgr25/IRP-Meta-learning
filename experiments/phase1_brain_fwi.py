@@ -124,6 +124,22 @@ def _symmetric_limits(images):
     return -vmax, vmax
 
 
+def _has_meaningful_change(
+    initial_model,
+    final_model,
+    atol: float = 1.0e-8,
+) -> bool:
+    """Return whether optimisation changed the model by more than roundoff.
+
+    The experiment can legitimately make almost no progress over a tiny number
+    of iterations or on a nearly stationary loss surface. In those cases we
+    would rather omit a redundant difference panel than imply a meaningful
+    update took place.
+    """
+
+    return not bool(jax.numpy.allclose(initial_model, final_model, atol=atol, rtol=0.0))
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -197,15 +213,14 @@ def main():
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
-    checkpoint_steps = [0, 10, 20]
-    panels = [("True velocity", x_exact)]
-    for step in checkpoint_steps:
-        image = snapshots.get(step, x_hat if step >= args.steps else x0)
-        panels.append((f"Step {step}", image))
-    diff_panels = [
-        ("Step 20 - Step 0", snapshots.get(20, x_hat) - snapshots.get(0, x0)),
-        ("True - Step 20", x_exact - snapshots.get(20, x_hat)),
+    panels = [
+        ("True velocity", x_exact),
+        ("Initial model", x0),
+        (f"Final model (step {args.steps})", x_hat),
     ]
+    diff_panels = [("True - Final", x_exact - x_hat)]
+    if _has_meaningful_change(x0, x_hat):
+        diff_panels.insert(0, ("Final - Initial", x_hat - x0))
 
     absolute_images = [image for _, image in panels]
     abs_vmin, abs_vmax = _shared_limits(absolute_images)
