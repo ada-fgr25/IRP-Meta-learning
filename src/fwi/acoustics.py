@@ -120,9 +120,7 @@ def _simulate_shot_with_history(
         lap_curr = _laplacian(u_curr, dx, dy)
         source_term = _inject_source(source, source_value, grid_shape)
         u_next = boundary_mask * (
-            2.0 * u_curr
-            - u_prev
-            + (dt**2) * ((velocity**2) * lap_curr + source_term)
+            2.0 * u_curr - u_prev + (dt**2) * ((velocity**2) * lap_curr + source_term)
         )
         traces = u_next[receiver_i, receiver_j]
         return (u_curr, u_next), (traces, u_curr, lap_curr)
@@ -145,7 +143,9 @@ def simulate_shot(
     the next wavefield.
     """
 
-    traces, _, _ = _simulate_shot_with_history(velocity, acquisition, config, shot_index)
+    traces, _, _ = _simulate_shot_with_history(
+        velocity, acquisition, config, shot_index
+    )
     return traces
 
 
@@ -236,8 +236,10 @@ def loss_and_grad(
             # - `u_n` receives the direct `2 * masked_cotangent` term
             # - plus the adjoint of the spatial operator
             cotangent_prev = -masked_cotangent
-            cotangent_curr = cotangent_curr + 2.0 * masked_cotangent + (dt**2) * (
-                _laplacian(velocity_sq * masked_cotangent, dx, dy)
+            cotangent_curr = (
+                cotangent_curr
+                + 2.0 * masked_cotangent
+                + (dt**2) * (_laplacian(velocity_sq * masked_cotangent, dx, dy))
             )
             return (cotangent_prev, cotangent_curr, grad_velocity), None
 

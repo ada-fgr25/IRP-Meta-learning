@@ -255,9 +255,7 @@ def main():
     metrics["steps"] = args.steps
     metrics["n_transducers"] = config.acquisition.n_transducers
     metrics["n_shots"] = config.acquisition.n_shots
-    metrics["n_receivers_per_shot"] = int(
-        params["acquisition"].n_receivers
-    )
+    metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
     metrics["model_source"] = config.model.source
     metrics["continuation_radii"] = list(continuation_radii)
     metrics["stage_steps"] = list(stage_steps)
