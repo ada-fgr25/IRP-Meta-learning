@@ -9,7 +9,7 @@ from .acquisition import (
     build_elliptical_acquisition,
     build_stride_acquisition,
 )
-from .acoustics import simulate_survey
+from .acoustics import loss_and_grad, simulate_survey
 from .stride_benchmark import StrideBenchmarkRunner
 
 
@@ -26,6 +26,17 @@ class JaxBackend:
 
     def forward(self, velocity, acquisition, config):
         return simulate_survey(velocity, acquisition, config)
+
+    def loss_grad(self, params, x, auxs):
+        """Return the explicit adjoint-state loss gradient in pure JAX."""
+
+        value, grad = loss_and_grad(
+            x,
+            params["acquisition"],
+            params["config"],
+            auxs[0],
+        )
+        return value.reshape((1,)), grad
 
 
 @dataclass(frozen=True)

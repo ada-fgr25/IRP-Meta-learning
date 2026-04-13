@@ -211,9 +211,14 @@ def smooth_traces(traces: jnp.ndarray, radius: int) -> jnp.ndarray:
 def dldx(params, x, auxs):
     """Return the loss value and gradient with respect to the velocity field.
 
-    The "adjoint" in this baseline is obtained implicitly through
-    `jax.value_and_grad`, which differentiates through the full forward solve.
+    The JAX backend now uses an explicit adjoint-state implementation written in
+    JAX. Other backends can still fall back to generic autodiff until they grow
+    their own specialised gradient routines.
     """
+
+    backend = build_backend(params["backend_name"])
+    if hasattr(backend, "loss_grad"):
+        return backend.loss_grad(params, x, auxs)
 
     value, grad = jax.value_and_grad(lambda model: loss(params, model, auxs).sum())(x)
     return value.reshape((1,)), grad
