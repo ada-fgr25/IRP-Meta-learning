@@ -12,6 +12,7 @@ import argparse
 import json
 from pathlib import Path
 
+from fwi.backends import build_backend
 from fwi.stride_benchmark import StrideBenchmarkLayout, StrideBenchmarkRunner
 
 
@@ -51,8 +52,16 @@ def _summary(runner: StrideBenchmarkRunner) -> dict[str, object]:
 
     snapshots = runner.list_velocity_snapshots()
     acquisitions_path = runner.acquisitions_path()
+    backend = build_backend("stride")
+    acquisition = backend.build_acquisition(config=None)
     return {
         "resource_dir": str(runner.layout.resource_dir.resolve()),
+        "shared_acquisition": {
+            "geometry_type": acquisition.geometry_type,
+            "n_transducers": acquisition.n_transducers,
+            "n_shots": acquisition.n_shots,
+            "n_time_samples": acquisition.n_time_samples,
+        },
         "reference_settings": runner.reference_settings(),
         "acquisitions_exists": acquisitions_path.exists(),
         "acquisitions_path": str(acquisitions_path),

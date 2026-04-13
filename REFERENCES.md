@@ -10,6 +10,7 @@ dependencies and conceptual inspirations are recorded.
 * Adler, J. and Oktem, O. (2017). "Learned Primal-Dual Reconstruction." This is one of the core learned-iterative-reconstruction references behind the project's meta-learning motivation.
 * Andrychowicz, M., Denil, M., Gomez, S., Hoffman, M. W., Pfau, D., Schaul, T., Shillingford, B., and de Freitas, N. (2016). "Learning to learn by gradient descent by gradient descent." This is a foundational reference for learned optimisers and unrolled meta-optimisation.
 * Benning, M., Burger, M., Celledoni, E., Ehrhardt, M. J., Owren, B., and Schonlieb, C.-B. (2021). "A Bregman framework for inverse problems and deep learning." This informs the optimisation and inverse-problem perspective described in the roadmap.
+* Plessix, R.-E. (2006). "A review of the adjoint-state method for computing the gradient of a functional with geophysical applications." This is the clearest conceptual reference for the explicit forward/adjoint split now implemented in the JAX backend.
 
 ## Software And Framework References
 
@@ -18,6 +19,13 @@ dependencies and conceptual inspirations are recorded.
 * Devito. Devito remains an important reference for explicit forward/adjoint PDE workflows, even though the current benchmark direction has shifted toward using Stride directly for high-fidelity comparison.
 * Stride. The benchmark path in this repository is based on the Stride brain-ultrasound example and the Stride package API used in the tracked benchmark scripts.
 * Descend. Descend is a reference point for the meta-learning training structure, especially the idea of keeping the outer optimiser-learning loop in JAX.
+
+## Implementation Notes
+
+The current backend split is now:
+
+* `jax` backend: explicit forward simulation in JAX, explicit adjoint-state gradient in JAX, and higher-order differentiation retained because the whole routine is still expressed with JAX primitives.
+* `stride` backend: benchmark-only orchestration around the tracked reference scripts, but exposed through the same acquisition/problem-facing API so experiments can swap bookkeeping more easily.
 
 ## Local Tracked Benchmark References
 

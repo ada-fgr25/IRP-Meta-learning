@@ -46,12 +46,15 @@ This project is currently in early development.
 Phase 1 now includes a runnable baseline for a synthetic brain-imaging FWI problem:
 
 * A differentiable 2D acoustic wave solver implemented directly in JAX
+* An explicit adjoint-state gradient in JAX, exposed through the shared FWI problem API
 * Stride-inspired elliptical acquisition geometry for brain ultrasound
 * A procedural brain phantom with skull, ventricles, and lesion structure
 * Classical optimisation baselines using SGD, Adam, and L-BFGS-B
 * Basic evaluation metrics for model and data misfit
 * A lightweight wrapper for the bundled Stride scripts so the reference brain
   example can be run as a benchmark outside the differentiable JAX path
+* A shared acquisition/problem API so experiments can inspect JAX and Stride
+  workflows through one common surface
 
 The repository also contains local reference resources from Stride and Descend under `resources/`. Those files are currently used as design references rather than imported runtime dependencies.
 
@@ -67,8 +70,9 @@ The project will be developed progressively, starting from simple and interpreta
 
 Current implementation note:
 
-* The active baseline uses a JAX-native solver so the full forward and adjoint pipeline remains differentiable end to end.
+* The active baseline keeps the forward solver in JAX and now uses an explicit JAX adjoint-state implementation for `dldx`.
 * The JAX baseline is the research path for differentiable optimisation and future meta-learning experiments.
+* The explicit adjoint is written purely in JAX, so higher-order meta-gradients remain available for learned-optimiser experiments.
 * The local Stride scripts under `resources/stride_fwi_brain/` are treated separately as a benchmark path rather than part of the end-to-end autodiff stack.
 
 ### Phase 2 — Meta-Learned Scalar Optimisation
@@ -129,6 +133,11 @@ PYTHONPATH=src python experiments/phase1_brain_fwi.py --optimizer adam --steps 2
 This experiment is intentionally JAX-only so the optimisation path remains
 fully differentiable.
 
+Implementation note:
+
+* `fwi.problem.build_brain_fwi_problem(...)` now returns a structured `FWIProblem` object with a shared `acquisition` description.
+* `fwi.problem.dldx(...)` uses the JAX backend's explicit adjoint-state routine rather than relying on generic reverse-mode differentiation through the full time loop.
+
 Useful options include:
 
 * `--optimizer {sgd,adam,lbfgsb}`
@@ -161,6 +170,11 @@ Useful options include:
 This wrapper simply orchestrates the reference scripts already stored under
 `resources/stride_fwi_brain/`. It is intended for benchmarking and qualitative
 comparison, not for differentiable meta-learning.
+
+Even though the Stride workflow is still benchmark-only, it now reports its
+survey setup through the same shared acquisition API used by the JAX path. That
+makes it easier to write experiment code that can swap between the research
+solver and the benchmark reference without changing all of its bookkeeping.
 
 Replication note:
 

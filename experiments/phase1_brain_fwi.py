@@ -124,6 +124,78 @@ def _symmetric_limits(images):
     return -vmax, vmax
 
 
+def _has_meaningful_change(
+    initial_model,
+    final_model,
+    atol: float = 1.0e-8,
+) -> bool:
+    """Return whether optimisation changed the model by more than roundoff.
+
+    The experiment can legitimately make almost no progress over a tiny number
+    of iterations or on a nearly stationary loss surface. In those cases we
+    would rather omit a redundant difference panel than imply a meaningful
+    update took place.
+    """
+
+    return not bool(jax.numpy.allclose(initial_model, final_model, atol=atol, rtol=0.0))
+
+
+def _plot_history(history: list[dict[str, float]], path: Path) -> None:
+    """Persist a compact within-stage optimisation-history figure.
+
+    The continuation schedule deliberately changes the objective between
+    stages, so raw losses are not directly comparable across the whole run.
+    This figure therefore resets the x-axis within each stage and only plots
+    within-stage changes, which makes the local optimisation behaviour much
+    easier to interpret.
+    """
+
+    if not history:
+        return
+
+    stages: dict[int, list[dict[str, float]]] = {}
+    for entry in history:
+        stage = int(entry.get("stage", 0.0))
+        stages.setdefault(stage, []).append(entry)
+
+    ordered_stages = [stages[key] for key in sorted(stages)]
+    has_rmse = all("model_rmse" in entry for entry in history)
+    nrows = 2 if has_rmse else 1
+    ncols = len(ordered_stages)
+
+    figure, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(4.5 * ncols, 4 * nrows),
+        squeeze=False,
+    )
+
+    for stage_index, stage_entries in enumerate(ordered_stages):
+        stage_steps = list(range(len(stage_entries)))
+        stage_losses = [entry["loss"] for entry in stage_entries]
+
+        loss_ax = axes[0][stage_index]
+        loss_ax.plot(stage_steps, stage_losses, marker="o", linewidth=1.5)
+        loss_ax.set_title(f"Stage {stage_index} loss")
+        loss_ax.set_xlabel("Step within stage")
+        loss_ax.set_ylabel("Loss")
+        loss_ax.set_yscale("log")
+        loss_ax.grid(True, alpha=0.3)
+
+        if has_rmse:
+            stage_rmses = [entry["model_rmse"] for entry in stage_entries]
+            rmse_ax = axes[1][stage_index]
+            rmse_ax.plot(stage_steps, stage_rmses, marker="o", linewidth=1.5)
+            rmse_ax.set_title(f"Stage {stage_index} RMSE")
+            rmse_ax.set_xlabel("Step within stage")
+            rmse_ax.set_ylabel("RMSE")
+            rmse_ax.grid(True, alpha=0.3)
+
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -175,7 +247,7 @@ def main():
             true_model=x_exact,
         )
 
-    y_hat = simulate_survey(x_hat, params["geometry"], config)
+    y_hat = simulate_survey(x_hat, params["acquisition"], config)
     metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
     metrics["backend"] = "jax"
     metrics["final_loss"] = final_loss
@@ -183,9 +255,7 @@ def main():
     metrics["steps"] = args.steps
     metrics["n_transducers"] = config.acquisition.n_transducers
     metrics["n_shots"] = config.acquisition.n_shots
-    metrics["n_receivers_per_shot"] = int(
-        params["geometry"]["transducer_indices"].shape[0]
-    )
+    metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
     metrics["model_source"] = config.model.source
     metrics["continuation_radii"] = list(continuation_radii)
     metrics["stage_steps"] = list(stage_steps)
@@ -195,17 +265,17 @@ def main():
     metrics["rmse_improvement"] = metrics["initial_model_rmse"] - metrics["model_rmse"]
     metrics["update_l2_norm"] = float(jax.numpy.linalg.norm(x_hat - x0))
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
+    history_plot_path = args.output_dir / f"{args.optimizer}_history.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
-    checkpoint_steps = [0, 10, 20]
-    panels = [("True velocity", x_exact)]
-    for step in checkpoint_steps:
-        image = snapshots.get(step, x_hat if step >= args.steps else x0)
-        panels.append((f"Step {step}", image))
-    diff_panels = [
-        ("Step 20 - Step 0", snapshots.get(20, x_hat) - snapshots.get(0, x0)),
-        ("True - Step 20", x_exact - snapshots.get(20, x_hat)),
+    panels = [
+        ("True velocity", x_exact),
+        ("Initial model", x0),
+        (f"Final model (step {args.steps})", x_hat),
     ]
+    diff_panels = [("True - Final", x_exact - x_hat)]
+    if _has_meaningful_change(x0, x_hat):
+        diff_panels.insert(0, ("Final - Initial", x_hat - x0))
 
     absolute_images = [image for _, image in panels]
     abs_vmin, abs_vmax = _shared_limits(absolute_images)
@@ -236,6 +306,7 @@ def main():
 
     figure.tight_layout()
     figure.savefig(reconstruction_path, dpi=150)
+    _plot_history(history, history_plot_path)
 
     with metrics_path.open("w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2)
@@ -250,6 +321,7 @@ def main():
     )
     print(f"Continuation radii: {continuation_radii}")
     print(f"Saved reconstruction plot to: {reconstruction_path}")
+    print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")
     print(f"Saved optimisation history to: {history_path}")
 
