@@ -90,10 +90,14 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
+    `checkpoint_interval` controls how many time steps of forward history are
+    recomputed at once during the explicit adjoint. Smaller values reduce peak
+    memory at the cost of more recomputation.
     """
 
     damping_cells: int = 40
     damping_strength: float = 0.015
+    checkpoint_interval: int = 32
 
 
 @dataclass(frozen=True)
