@@ -11,6 +11,8 @@ from __future__ import annotations
 from importlib import import_module
 
 __all__ = [
+    "AcquisitionGeometry",
+    "FWIProblem",
     "build_backend",
     "build_brain_fwi_problem",
     "compute_metrics",
@@ -25,6 +27,8 @@ __all__ = [
 ]
 
 _EXPORTS = {
+    "AcquisitionGeometry": (".acquisition", "AcquisitionGeometry"),
+    "FWIProblem": (".problem", "FWIProblem"),
     "build_backend": (".backends", "build_backend"),
     "build_brain_fwi_problem": (".problem", "build_brain_fwi_problem"),
     "compute_metrics": (".metrics", "compute_metrics"),
