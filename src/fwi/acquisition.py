@@ -64,13 +64,31 @@ class AcquisitionGeometry:
         return dict(self.metadata)
 
 
-def _ricker_wavelet(nt: int, dt: float, frequency_hz: float) -> jnp.ndarray:
-    """Generate a compact source pulse for ultrasound transmission."""
+def _tone_burst_wavelet(
+    nt: int,
+    dt: float,
+    frequency_hz: float,
+    n_cycles: int,
+) -> jnp.ndarray:
+    """Generate a finite-length tone burst closer to the tracked Stride source.
+
+    The Stride benchmark scripts drive each transducer with a `3`-cycle tone
+    burst centred at `0.25 MHz`. We mirror that source family here so the JAX
+    baseline starts from a waveform that is much closer to the reference
+    acquisition before any inversion-time filtering is applied.
+    """
 
     t = jnp.arange(nt) * dt
-    t0 = 1.5 / frequency_hz
-    arg = jnp.pi * frequency_hz * (t - t0)
-    return (1.0 - 2.0 * arg**2) * jnp.exp(-(arg**2))
+    burst_duration = n_cycles / frequency_hz
+
+    # The squared-sine taper keeps the pulse compact and symmetric while still
+    # being easy to express with JAX primitives. Samples after the active burst
+    # window are set to zero so later frequencies come only from propagation.
+    phase = jnp.pi * jnp.clip(t / burst_duration, 0.0, 1.0)
+    envelope = jnp.sin(phase) ** 2
+    carrier = jnp.sin(2.0 * jnp.pi * frequency_hz * t)
+    active = (t <= burst_duration).astype(t.dtype)
+    return active * envelope * carrier
 
 
 def _select_shot_indices(n_transducers: int, n_shots: int) -> jnp.ndarray:
@@ -118,16 +136,18 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
         n_time_samples=config.time.nt,
         transducer_indices=indices,
         shot_indices=shot_indices,
-        source_wavelet=_ricker_wavelet(
+        source_wavelet=_tone_burst_wavelet(
             config.time.nt,
             config.time.dt,
             acq.source_frequency_hz,
+            acq.source_cycles,
         )
         * acq.source_amplitude,
         metadata=(
             ("ellipse_scale_x", acq.ellipse_scale_x),
             ("ellipse_scale_y", acq.ellipse_scale_y),
             ("source_frequency_hz", acq.source_frequency_hz),
+            ("source_cycles", acq.source_cycles),
             ("source_amplitude", acq.source_amplitude),
         ),
     )
