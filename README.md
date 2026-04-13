@@ -55,6 +55,10 @@ Phase 1 now includes a runnable baseline for a synthetic brain-imaging FWI probl
   example can be run as a benchmark outside the differentiable JAX path
 * A shared acquisition/problem API so experiments can inspect JAX and Stride
   workflows through one common surface
+* A Stride-oriented Phase 1 configuration that now uses the tracked benchmark's
+  `500 x 370` grid, `256`-location acquisition ring, `2500` time samples,
+  `0.25 MHz` `3`-cycle tone-burst source family, Stride-style `0.5 * sum(r^2)`
+  loss scaling, and a band-limited `f_max` continuation schedule
 
 The repository also contains local reference resources from Stride and Descend under `resources/`. Those files are currently used as design references rather than imported runtime dependencies.
 
@@ -127,7 +131,7 @@ sources used by the repository lives in [REFERENCES.md](/home/fgr25/IRP/IRP-Meta
 The baseline experiment entrypoint is:
 
 ```bash
-PYTHONPATH=src python experiments/phase1_brain_fwi.py --optimizer adam --steps 20
+PYTHONPATH=src python experiments/phase1_brain_fwi.py
 ```
 
 This experiment is intentionally JAX-only so the optimisation path remains
@@ -141,8 +145,10 @@ Implementation note:
 Useful options include:
 
 * `--optimizer {sgd,adam,lbfgsb}`
-* `--nx`, `--ny`, `--nt` to change grid and recording sizes
-* `--n-transducers`, `--n-shots` to adjust acquisition cost
+* `--max-freqs-hz` to set the Stride-like `f_max` continuation schedule
+* `--shots-per-iter` and `--seed` to control the random shot subsets
+* `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
+* `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
 Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 
@@ -151,6 +157,11 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * optimisation history in JSON
 
 The core implementation lives directly under `src/fwi/` so imports stay short and explicit, for example `from fwi.problem import init_params`.
+
+Parity note:
+
+* The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
+* The JAX path is still an approximation rather than a full Stride reimplementation. In particular, it uses the repository's JAX solver and trace-domain FFT masking to approximate Stride's `f_max` continuation rather than calling Stride's in-process Devito pipeline.
 
 ## ▶️ Running The Stride Benchmark
 

@@ -19,6 +19,7 @@ dependencies and conceptual inspirations are recorded.
 * Devito. Devito remains an important reference for explicit forward/adjoint PDE workflows, even though the current benchmark direction has shifted toward using Stride directly for high-fidelity comparison.
 * Stride. The benchmark path in this repository is based on the Stride brain-ultrasound example and the Stride package API used in the tracked benchmark scripts.
 * Descend. Descend is a reference point for the meta-learning training structure, especially the idea of keeping the outer optimiser-learning loop in JAX.
+* NumPy FFT documentation. This is the reference convention for the repository's tracked spectrum helpers and the new FFT-domain band-limiting used to approximate Stride's `f_max` continuation from within the JAX solver path.
 
 ## Implementation Notes
 
@@ -26,6 +27,7 @@ The current backend split is now:
 
 * `jax` backend: explicit forward simulation in JAX, explicit adjoint-state gradient in JAX, and higher-order differentiation retained because the whole routine is still expressed with JAX primitives.
 * `stride` backend: benchmark-only orchestration around the tracked reference scripts, but exposed through the same acquisition/problem-facing API so experiments can swap bookkeeping more easily.
+* The JAX Phase 1 driver now also carries a Stride-oriented operating mode by default: benchmark-scale grid/time settings, a `3`-cycle `0.25 MHz` tone-burst source family, Stride-style `0.5 * sum(r^2)` loss scaling, random `32`-shot subsets per iteration, and a `0.1/0.2/0.3 MHz` `f_max` schedule implemented with trace-domain FFT masks.
 
 ## Local Tracked Benchmark References
 
