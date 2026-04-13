@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fwi.backends import build_backend
 from fwi.stride_benchmark import StrideBenchmarkLayout, StrideBenchmarkRunner
 
 
@@ -48,6 +49,15 @@ class StrideBenchmarkTests(unittest.TestCase):
                     "alpha2D-Vp-00010.h5",
                 ],
             )
+
+    def test_stride_backend_exposes_shared_acquisition_metadata(self):
+        """The benchmark path should fit the shared acquisition API surface."""
+
+        acquisition = build_backend("stride").build_acquisition(config=None)
+
+        self.assertEqual(acquisition.geometry_type, "elliptical")
+        self.assertEqual(acquisition.n_transducers, 256)
+        self.assertEqual(acquisition.n_time_samples, 2500)
 
 
 if __name__ == "__main__":
