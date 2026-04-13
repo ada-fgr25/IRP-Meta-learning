@@ -48,6 +48,90 @@ def _build_damping_mask(config: BrainFWIConfig) -> jnp.ndarray:
     return 1.0 - strength * taper**2
 
 
+def _build_boundary_mask(config: BrainFWIConfig) -> jnp.ndarray:
+    """Combine damping and fixed-edge clamping into one linear mask.
+
+    Writing the boundary treatment this way keeps the forward and adjoint
+    implementations aligned: both simply apply the same self-adjoint diagonal
+    mask rather than having to mirror a sequence of in-place edge updates.
+    """
+
+    damping = _build_damping_mask(config)
+    interior = jnp.ones_like(damping)
+    interior = interior.at[0, :].set(0.0)
+    interior = interior.at[-1, :].set(0.0)
+    interior = interior.at[:, 0].set(0.0)
+    interior = interior.at[:, -1].set(0.0)
+    return damping * interior
+
+
+def _inject_source(
+    source_index: jnp.ndarray,
+    source_value: jnp.ndarray,
+    shape: tuple[int, int],
+) -> jnp.ndarray:
+    """Place one source sample onto the full simulation grid."""
+
+    return jnp.zeros(shape).at[source_index[0], source_index[1]].set(source_value)
+
+
+def _inject_receivers(
+    receiver_i: jnp.ndarray,
+    receiver_j: jnp.ndarray,
+    receiver_values: jnp.ndarray,
+    shape: tuple[int, int],
+) -> jnp.ndarray:
+    """Scatter receiver-domain cotangents back onto the grid.
+
+    The injection uses `add` rather than `set` so the code remains correct even
+    if a future geometry reuses the same grid cell for multiple receivers.
+    """
+
+    return jnp.zeros(shape).at[receiver_i, receiver_j].add(receiver_values)
+
+
+def _simulate_shot_with_history(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    shot_index: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Run one shot while storing the forward states needed by the adjoint.
+
+    We record the current wavefield and its Laplacian at each time step. The
+    explicit adjoint later reuses those arrays when it accumulates the velocity
+    gradient and propagates wavefield sensitivities backwards in time.
+    """
+
+    dt = config.time.dt
+    dx = config.grid.dx
+    dy = config.grid.dy
+    receivers, _, wavelet = acquisition.require_solver_arrays()
+    source = receivers[shot_index]
+    receiver_i = receivers[:, 0]
+    receiver_j = receivers[:, 1]
+    boundary_mask = _build_boundary_mask(config)
+    grid_shape = velocity.shape
+
+    def step(carry, source_value):
+        """Advance one time step and emit all adjoint-side history tensors."""
+
+        u_prev, u_curr = carry
+        lap_curr = _laplacian(u_curr, dx, dy)
+        source_term = _inject_source(source, source_value, grid_shape)
+        u_next = boundary_mask * (
+            2.0 * u_curr
+            - u_prev
+            + (dt**2) * ((velocity**2) * lap_curr + source_term)
+        )
+        traces = u_next[receiver_i, receiver_j]
+        return (u_curr, u_next), (traces, u_curr, lap_curr)
+
+    init = (jnp.zeros_like(velocity), jnp.zeros_like(velocity))
+    _, (traces, curr_fields, laplacians) = jax.lax.scan(step, init, wavelet)
+    return traces, curr_fields, laplacians
+
+
 def simulate_shot(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
@@ -61,43 +145,7 @@ def simulate_shot(
     the next wavefield.
     """
 
-    dt = config.time.dt
-    dx = config.grid.dx
-    dy = config.grid.dy
-    receivers, _, wavelet = acquisition.require_solver_arrays()
-    source = receivers[shot_index]
-    damping = _build_damping_mask(config)
-    receiver_i = receivers[:, 0]
-    receiver_j = receivers[:, 1]
-
-    def step(carry, source_value):
-        """Advance the wavefield by one time step and sample all receivers."""
-
-        u_prev, u_curr = carry
-        lap = _laplacian(u_curr, dx, dy)
-
-        # Inject the source pulse at a single transducer location. Because the
-        # solver update is multiplied by `dt**2`, the source amplitude in the
-        # configuration is intentionally large enough to keep the observed data
-        # numerically meaningful at this coarse baseline scale.
-        source_term = jnp.zeros_like(u_curr).at[source[0], source[1]].set(source_value)
-        u_next = 2.0 * u_curr - u_prev + (dt**2) * ((velocity**2) * lap + source_term)
-
-        # Apply a light damping frame and keep the outermost cells fixed at zero.
-        u_next = damping * u_next
-        u_next = u_next.at[0, :].set(0.0)
-        u_next = u_next.at[-1, :].set(0.0)
-        u_next = u_next.at[:, 0].set(0.0)
-        u_next = u_next.at[:, -1].set(0.0)
-
-        traces = u_next[receiver_i, receiver_j]
-        return (u_curr, u_next), traces
-
-    init = (
-        jnp.zeros_like(velocity),
-        jnp.zeros_like(velocity),
-    )
-    _, traces = jax.lax.scan(step, init, wavelet)
+    traces, _, _ = _simulate_shot_with_history(velocity, acquisition, config, shot_index)
     return traces
 
 
