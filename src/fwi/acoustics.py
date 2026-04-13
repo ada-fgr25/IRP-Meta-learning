@@ -12,6 +12,7 @@ import jax.numpy as jnp
 
 from .acquisition import AcquisitionGeometry
 from .config import BrainFWIConfig
+from .filtering import bandlimit_traces
 
 
 def _laplacian(field: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
@@ -170,13 +171,14 @@ def loss_and_grad(
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
     observed_data: jnp.ndarray,
+    f_max_hz: float | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute the survey loss and explicit adjoint gradient in JAX.
 
-    The loss remains the same mean-squared data misfit used elsewhere in the
-    repository. The difference is that the gradient is now produced by an
-    explicit reverse-time adjoint implementation instead of tracing backward
-    through the entire forward simulation with generic autodiff.
+    The gradient is produced by an explicit reverse-time adjoint
+    implementation. The data misfit itself now mirrors the tracked Stride
+    benchmark more closely by combining a Stride-style `0.5 * sum(r^2)` loss
+    with an optional `f_max` low-pass filter applied in the trace domain.
     """
 
     dt = config.time.dt
@@ -188,8 +190,6 @@ def loss_and_grad(
     velocity_sq = velocity**2
     boundary_mask = _build_boundary_mask(config)
     grid_shape = velocity.shape
-    loss_scale = 1.0 / observed_data.size
-
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
 
@@ -200,8 +200,14 @@ def loss_and_grad(
             shot_index,
         )
         residual = traces - observed_shot
-        shot_loss = jnp.sum(residual**2) * loss_scale
-        data_cotangents = 2.0 * residual * loss_scale
+
+        # The FFT mask defines a linear zero-phase operator. Applying it to the
+        # residual gives us the band-limited misfit used for the current stage,
+        # and because the filter is symmetric in time the same filtered residual
+        # also acts as the trace-domain cotangent for the adjoint.
+        residual = bandlimit_traces(residual, dt, f_max_hz, axis=0)
+        shot_loss = 0.5 * jnp.sum(residual**2)
+        data_cotangents = residual
 
         def reverse_step(carry, xs):
             """Reverse one time step of the discrete wave equation."""

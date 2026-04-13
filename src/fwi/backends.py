@@ -35,6 +35,7 @@ class JaxBackend:
             params["acquisition"],
             params["config"],
             auxs[0],
+            auxs[1] if len(auxs) > 1 else None,
         )
         return value.reshape((1,)), grad
 
