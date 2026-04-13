@@ -147,6 +147,7 @@ Useful options include:
 * `--optimizer {sgd,adam,lbfgsb}`
 * `--max-freqs-hz` to set the Stride-like `f_max` continuation schedule
 * `--shots-per-iter` and `--seed` to control the random shot subsets
+* `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
 * `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
@@ -162,6 +163,7 @@ Parity note:
 
 * The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
 * The JAX path is still an approximation rather than a full Stride reimplementation. In particular, it uses the repository's JAX solver and trace-domain FFT masking to approximate Stride's `f_max` continuation rather than calling Stride's in-process Devito pipeline.
+* Full-grid runs are still demanding. The solver now reduces memory by accumulating shots sequentially and replaying the adjoint in checkpointed time segments, but large benchmark-scale runs may still need smaller shot subsets, smaller checkpoint intervals, or more capable hardware.
 
 ## ▶️ Running The Stride Benchmark
 

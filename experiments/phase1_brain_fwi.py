@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument("--n-transducers", type=int, default=256)
     parser.add_argument("--n-shots", type=int, default=256)
     parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=32,
+        help="Number of time steps to replay per adjoint checkpoint segment.",
+    )
+    parser.add_argument(
         "--max-freqs-hz",
         type=str,
         default="100000,200000,300000",
@@ -93,7 +99,7 @@ def build_config(args) -> BrainFWIConfig:
             n_shots=args.n_shots,
         ),
         model=ModelConfig(),
-        solver=SolverConfig(),
+        solver=SolverConfig(checkpoint_interval=args.checkpoint_interval),
     )
 
 
@@ -308,6 +314,7 @@ def main():
     metrics["stage_steps"] = list(stage_steps)
     metrics["shots_per_iter"] = args.shots_per_iter
     metrics["seed"] = args.seed
+    metrics["checkpoint_interval"] = config.solver.checkpoint_interval
     metrics["initial_model_rmse"] = float(
         jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
     )
@@ -370,6 +377,7 @@ def main():
     )
     print(f"Max frequencies (Hz): {max_freqs_hz}")
     print(f"Random shots per iteration: {args.shots_per_iter}")
+    print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")
