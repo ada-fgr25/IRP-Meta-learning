@@ -162,7 +162,7 @@ def build_brain_fwi_problem(
     )
 
 
-def forward(params, x):
+def forward(params, x, shot_indices: jnp.ndarray | None = None):
     """Run the configured forward model for a candidate velocity field.
 
     `x` is a velocity model candidate and the result is a full simulated data
@@ -170,7 +170,12 @@ def forward(params, x):
     """
 
     backend = build_backend(params["backend_name"])
-    return backend.forward(x, params["acquisition"], params["config"])
+    return backend.forward(
+        x,
+        params["acquisition"],
+        params["config"],
+        shot_indices=shot_indices,
+    )
 
 
 def loss(params, x, auxs):
@@ -184,7 +189,8 @@ def loss(params, x, auxs):
 
     y_obs = auxs[0]
     f_max_hz = auxs[1] if len(auxs) > 1 else None
-    y = forward(params, x)
+    shot_indices = auxs[2] if len(auxs) > 2 else None
+    y = forward(params, x, shot_indices=shot_indices)
     residual = y - y_obs
     residual = bandlimit_traces(residual, params["config"].time.dt, f_max_hz)
     return (0.5 * jnp.sum(residual**2)).reshape((1,))

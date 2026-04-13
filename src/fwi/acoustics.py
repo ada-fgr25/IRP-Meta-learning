@@ -154,6 +154,7 @@ def simulate_survey(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    shot_indices: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Simulate all configured shots in the acquisition.
 
@@ -161,9 +162,12 @@ def simulate_survey(
     cube used by the FWI loss.
     """
 
+    active_shot_indices = (
+        acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
+    )
     return jax.vmap(
         lambda shot_idx: simulate_shot(velocity, acquisition, config, shot_idx)
-    )(acquisition.require_solver_arrays()[1])
+    )(active_shot_indices)
 
 
 def loss_and_grad(
@@ -172,6 +176,7 @@ def loss_and_grad(
     config: BrainFWIConfig,
     observed_data: jnp.ndarray,
     f_max_hz: float | None = None,
+    shot_indices: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute the survey loss and explicit adjoint gradient in JAX.
 
@@ -184,7 +189,10 @@ def loss_and_grad(
     dt = config.time.dt
     dx = config.grid.dx
     dy = config.grid.dy
-    receivers, shot_indices, _ = acquisition.require_solver_arrays()
+    receivers, acquisition_shot_indices, _ = acquisition.require_solver_arrays()
+    active_shot_indices = (
+        acquisition_shot_indices if shot_indices is None else shot_indices
+    )
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
     velocity_sq = velocity**2
@@ -266,5 +274,5 @@ def loss_and_grad(
         del cotangent_initial_prev, cotangent_initial_curr
         return shot_loss, shot_grad
 
-    shot_losses, shot_grads = jax.vmap(shot_loss_grad)(shot_indices, observed_data)
+    shot_losses, shot_grads = jax.vmap(shot_loss_grad)(active_shot_indices, observed_data)
     return jnp.sum(shot_losses), jnp.sum(shot_grads, axis=0)
