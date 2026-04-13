@@ -274,5 +274,19 @@ def loss_and_grad(
         del cotangent_initial_prev, cotangent_initial_curr
         return shot_loss, shot_grad
 
-    shot_losses, shot_grads = jax.vmap(shot_loss_grad)(active_shot_indices, observed_data)
-    return jnp.sum(shot_losses), jnp.sum(shot_grads, axis=0)
+    # Accumulate shots sequentially rather than with `vmap`. This keeps only
+    # one shot's forward/adjoint history live at a time, which is much more
+    # memory-friendly on large benchmark-sized problems.
+    def accumulate_shot(carry, xs):
+        total_loss, total_grad = carry
+        shot_index, observed_shot = xs
+        shot_loss, shot_grad = shot_loss_grad(shot_index, observed_shot)
+        return (total_loss + shot_loss, total_grad + shot_grad), None
+
+    init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
+    (total_loss, total_grad), _ = jax.lax.scan(
+        accumulate_shot,
+        init,
+        (active_shot_indices, observed_data),
+    )
+    return total_loss, total_grad
