@@ -141,40 +141,55 @@ def _has_meaningful_change(
 
 
 def _plot_history(history: list[dict[str, float]], path: Path) -> None:
-    """Persist a compact optimisation-history figure beside the reconstruction.
+    """Persist a compact within-stage optimisation-history figure.
 
-    The model images are useful for qualitative inspection, but they can hide
-    very small-yet-real updates when the colour range is wide. A dedicated
-    history plot makes it obvious whether the optimiser is actually reducing the
-    loss and, when available, whether it is improving model RMSE as well.
+    The continuation schedule deliberately changes the objective between
+    stages, so raw losses are not directly comparable across the whole run.
+    This figure therefore resets the x-axis within each stage and only plots
+    within-stage changes, which makes the local optimisation behaviour much
+    easier to interpret.
     """
 
     if not history:
         return
 
-    steps = [entry["step"] for entry in history]
-    losses = [entry["loss"] for entry in history]
+    stages: dict[int, list[dict[str, float]]] = {}
+    for entry in history:
+        stage = int(entry.get("stage", 0.0))
+        stages.setdefault(stage, []).append(entry)
+
+    ordered_stages = [stages[key] for key in sorted(stages)]
     has_rmse = all("model_rmse" in entry for entry in history)
-    ncols = 2 if has_rmse else 1
+    nrows = 2 if has_rmse else 1
+    ncols = len(ordered_stages)
 
-    figure, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
-    if ncols == 1:
-        axes = [axes]
+    figure, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(4.5 * ncols, 4 * nrows),
+        squeeze=False,
+    )
 
-    axes[0].plot(steps, losses, marker="o", linewidth=1.5)
-    axes[0].set_title("Loss history")
-    axes[0].set_xlabel("Step")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_yscale("log")
-    axes[0].grid(True, alpha=0.3)
+    for stage_index, stage_entries in enumerate(ordered_stages):
+        stage_steps = list(range(len(stage_entries)))
+        stage_losses = [entry["loss"] for entry in stage_entries]
 
-    if has_rmse:
-        rmses = [entry["model_rmse"] for entry in history]
-        axes[1].plot(steps, rmses, marker="o", linewidth=1.5)
-        axes[1].set_title("Model RMSE history")
-        axes[1].set_xlabel("Step")
-        axes[1].set_ylabel("RMSE")
-        axes[1].grid(True, alpha=0.3)
+        loss_ax = axes[0][stage_index]
+        loss_ax.plot(stage_steps, stage_losses, marker="o", linewidth=1.5)
+        loss_ax.set_title(f"Stage {stage_index} loss")
+        loss_ax.set_xlabel("Step within stage")
+        loss_ax.set_ylabel("Loss")
+        loss_ax.set_yscale("log")
+        loss_ax.grid(True, alpha=0.3)
+
+        if has_rmse:
+            stage_rmses = [entry["model_rmse"] for entry in stage_entries]
+            rmse_ax = axes[1][stage_index]
+            rmse_ax.plot(stage_steps, stage_rmses, marker="o", linewidth=1.5)
+            rmse_ax.set_title(f"Stage {stage_index} RMSE")
+            rmse_ax.set_xlabel("Step within stage")
+            rmse_ax.set_ylabel("RMSE")
+            rmse_ax.grid(True, alpha=0.3)
 
     figure.tight_layout()
     figure.savefig(path, dpi=150)
