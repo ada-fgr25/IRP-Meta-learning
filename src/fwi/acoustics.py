@@ -163,3 +163,100 @@ def simulate_survey(
     return jax.vmap(
         lambda shot_idx: simulate_shot(velocity, acquisition, config, shot_idx)
     )(acquisition.require_solver_arrays()[1])
+
+
+def loss_and_grad(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    observed_data: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute the survey loss and explicit adjoint gradient in JAX.
+
+    The loss remains the same mean-squared data misfit used elsewhere in the
+    repository. The difference is that the gradient is now produced by an
+    explicit reverse-time adjoint implementation instead of tracing backward
+    through the entire forward simulation with generic autodiff.
+    """
+
+    dt = config.time.dt
+    dx = config.grid.dx
+    dy = config.grid.dy
+    receivers, shot_indices, _ = acquisition.require_solver_arrays()
+    receiver_i = receivers[:, 0]
+    receiver_j = receivers[:, 1]
+    velocity_sq = velocity**2
+    boundary_mask = _build_boundary_mask(config)
+    grid_shape = velocity.shape
+    loss_scale = 1.0 / observed_data.size
+
+    def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
+        """Run one forward/adjoint pair and return its loss contribution."""
+
+        traces, curr_fields, laplacians = _simulate_shot_with_history(
+            velocity,
+            acquisition,
+            config,
+            shot_index,
+        )
+        residual = traces - observed_shot
+        shot_loss = jnp.sum(residual**2) * loss_scale
+        data_cotangents = 2.0 * residual * loss_scale
+
+        def reverse_step(carry, xs):
+            """Reverse one time step of the discrete wave equation."""
+
+            cotangent_curr, cotangent_next, grad_velocity = carry
+            curr_field, laplacian_curr, data_cotangent = xs
+
+            # The observation operator samples the next wavefield at receiver
+            # points, so its adjoint scatters those trace-domain cotangents back
+            # onto the full grid before the wave-equation reverse step.
+            cotangent_next = cotangent_next + _inject_receivers(
+                receiver_i,
+                receiver_j,
+                data_cotangent,
+                grid_shape,
+            )
+
+            # The boundary operator is just a diagonal mask, so it is its own
+            # adjoint. Applying it here mirrors the boundary treatment used in
+            # the forward step.
+            masked_cotangent = boundary_mask * cotangent_next
+
+            # The gradient with respect to velocity comes from differentiating
+            # `velocity**2 * laplacian(u_n)` pointwise at each time step.
+            grad_velocity = (
+                grad_velocity
+                + 2.0 * velocity * (dt**2) * masked_cotangent * laplacian_curr
+            )
+
+            # Reverse propagation through the explicit second-order update:
+            # - `u_{n-1}` receives `-masked_cotangent`
+            # - `u_n` receives the direct `2 * masked_cotangent` term
+            # - plus the adjoint of the spatial operator
+            cotangent_prev = -masked_cotangent
+            cotangent_curr = cotangent_curr + 2.0 * masked_cotangent + (dt**2) * (
+                _laplacian(velocity_sq * masked_cotangent, dx, dy)
+            )
+            return (cotangent_prev, cotangent_curr, grad_velocity), None
+
+        init_carry = (
+            jnp.zeros_like(velocity),
+            jnp.zeros_like(velocity),
+            jnp.zeros_like(velocity),
+        )
+        (cotangent_initial_prev, cotangent_initial_curr, shot_grad), _ = jax.lax.scan(
+            reverse_step,
+            init_carry,
+            (curr_fields, laplacians, data_cotangents),
+            reverse=True,
+        )
+
+        # The initial wavefields are fixed zeros rather than optimisation
+        # variables, so their cotangents are intentionally ignored.
+        del cotangent_initial_prev, cotangent_initial_curr
+        return shot_loss, shot_grad
+
+    shot_losses, shot_grads = jax.vmap(shot_loss_grad)(shot_indices, observed_data)
+    return jnp.sum(shot_losses), jnp.sum(shot_grads, axis=0)
