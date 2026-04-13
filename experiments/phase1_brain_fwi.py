@@ -140,6 +140,47 @@ def _has_meaningful_change(
     return not bool(jax.numpy.allclose(initial_model, final_model, atol=atol, rtol=0.0))
 
 
+def _plot_history(history: list[dict[str, float]], path: Path) -> None:
+    """Persist a compact optimisation-history figure beside the reconstruction.
+
+    The model images are useful for qualitative inspection, but they can hide
+    very small-yet-real updates when the colour range is wide. A dedicated
+    history plot makes it obvious whether the optimiser is actually reducing the
+    loss and, when available, whether it is improving model RMSE as well.
+    """
+
+    if not history:
+        return
+
+    steps = [entry["step"] for entry in history]
+    losses = [entry["loss"] for entry in history]
+    has_rmse = all("model_rmse" in entry for entry in history)
+    ncols = 2 if has_rmse else 1
+
+    figure, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
+    if ncols == 1:
+        axes = [axes]
+
+    axes[0].plot(steps, losses, marker="o", linewidth=1.5)
+    axes[0].set_title("Loss history")
+    axes[0].set_xlabel("Step")
+    axes[0].set_ylabel("Loss")
+    axes[0].set_yscale("log")
+    axes[0].grid(True, alpha=0.3)
+
+    if has_rmse:
+        rmses = [entry["model_rmse"] for entry in history]
+        axes[1].plot(steps, rmses, marker="o", linewidth=1.5)
+        axes[1].set_title("Model RMSE history")
+        axes[1].set_xlabel("Step")
+        axes[1].set_ylabel("RMSE")
+        axes[1].grid(True, alpha=0.3)
+
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -211,6 +252,7 @@ def main():
     metrics["rmse_improvement"] = metrics["initial_model_rmse"] - metrics["model_rmse"]
     metrics["update_l2_norm"] = float(jax.numpy.linalg.norm(x_hat - x0))
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
+    history_plot_path = args.output_dir / f"{args.optimizer}_history.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
     history_path = args.output_dir / f"{args.optimizer}_history.json"
     panels = [
@@ -251,6 +293,7 @@ def main():
 
     figure.tight_layout()
     figure.savefig(reconstruction_path, dpi=150)
+    _plot_history(history, history_plot_path)
 
     with metrics_path.open("w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2)
@@ -265,6 +308,7 @@ def main():
     )
     print(f"Continuation radii: {continuation_radii}")
     print(f"Saved reconstruction plot to: {reconstruction_path}")
+    print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")
     print(f"Saved optimisation history to: {history_path}")
 
