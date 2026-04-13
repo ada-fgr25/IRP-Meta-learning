@@ -7,6 +7,7 @@ loss, and obtain gradients with respect to the model.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from dataclasses import replace
 
 import jax
@@ -15,6 +16,37 @@ import jax.numpy as jnp
 from .backends import build_backend
 from .config import BrainFWIConfig
 from .phantoms import build_initial_velocity, build_true_brain_velocity
+
+
+@dataclass(frozen=True)
+class FWIProblem:
+    """Compact shared problem object used by experiments and tests.
+
+    The repository historically passed raw dictionaries around. We still expose
+    that compatibility layer, but the dataclass is the clearer shared API for
+    backend-swappable experiments moving forward.
+    """
+
+    config: BrainFWIConfig
+    backend_name: str
+    acquisition: object
+    x0: jnp.ndarray
+    x_exact: jnp.ndarray
+    y_obs: jnp.ndarray
+
+    def as_params(self) -> dict[str, object]:
+        """Convert the structured object into the legacy dictionary surface."""
+
+        return {
+            "config": self.config,
+            "acquisition": self.acquisition,
+            "geometry": self.acquisition,
+            "backend_name": self.backend_name,
+            "x0": self.x0,
+            "x_exact": self.x_exact,
+            "y_obs": self.y_obs,
+            "auxs_shapes": (self.y_obs.shape,),
+        }
 
 
 def _load_stride_field(
@@ -93,16 +125,14 @@ def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "
     acquisition = backend.build_acquisition(config)
     y_obs = backend.forward(x_exact, acquisition, config)
 
-    return {
-        "config": config,
-        "acquisition": acquisition,
-        "geometry": acquisition,
-        "backend_name": backend_name,
-        "x0": x0,
-        "x_exact": x_exact,
-        "y_obs": y_obs,
-        "auxs_shapes": (y_obs.shape,),
-    }
+    return FWIProblem(
+        config=config,
+        backend_name=backend_name,
+        acquisition=acquisition,
+        x0=x0,
+        x_exact=x_exact,
+        y_obs=y_obs,
+    ).as_params()
 
 
 def build_brain_fwi_problem(
@@ -115,7 +145,20 @@ def build_brain_fwi_problem(
     all of the underlying helper modules.
     """
 
-    return init_params(key, config=config, backend_name=backend_name)
+    del key
+    config = config or BrainFWIConfig()
+    config, x_exact, x0 = _initialise_models(config)
+    backend = build_backend(backend_name)
+    acquisition = backend.build_acquisition(config)
+    y_obs = backend.forward(x_exact, acquisition, config)
+    return FWIProblem(
+        config=config,
+        backend_name=backend_name,
+        acquisition=acquisition,
+        x0=x0,
+        x_exact=x_exact,
+        y_obs=y_obs,
+    )
 
 
 def forward(params, x):

@@ -14,7 +14,7 @@ from fwi.config import (
     ModelConfig,
     TimeConfig,
 )
-from fwi.problem import dldx, init_params, smooth_traces
+from fwi.problem import build_brain_fwi_problem, dldx, init_params, smooth_traces
 
 
 def _tiny_config() -> BrainFWIConfig:
@@ -60,6 +60,15 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         self.assertEqual(y_smooth.shape, y_obs.shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(y_smooth))))
+
+    def test_problem_builder_returns_shared_problem_object(self):
+        """The explicit problem builder should expose the shared API object."""
+
+        problem = build_brain_fwi_problem(jax.random.PRNGKey(0), config=_tiny_config())
+
+        self.assertEqual(problem.backend_name, "jax")
+        self.assertEqual(problem.acquisition.n_shots, 3)
+        self.assertEqual(problem.y_obs.shape, (3, 40, 12))
 
 
 if __name__ == "__main__":
