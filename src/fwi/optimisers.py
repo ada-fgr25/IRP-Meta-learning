@@ -170,10 +170,9 @@ def run_stagewise_optax(
     bounds: tuple[float, float],
     true_model: Array | None = None,
     snapshot_steps: tuple[int, ...] = (0, 10, 20),
-    make_step_loss_grad_fn: Callable[
-        [int, int], Callable[[Array], tuple[Array, Array]]
-    ]
-    | None = None,
+    make_step_loss_grad_fn: (
+        Callable[[int, int], Callable[[Array], tuple[Array, Array]]] | None
+    ) = None,
 ):
     """Run an Optax optimiser across multiple continuation stages.
 

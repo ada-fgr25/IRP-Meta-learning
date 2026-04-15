@@ -104,7 +104,9 @@ def _step_shot_state(
     dt: float,
     dx: float,
     dy: float,
-) -> tuple[tuple[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+]:
     """Advance one time step, optionally turning padded steps into no-ops.
 
     Fixed-length checkpoint segments are easier for JAX to compile than a
@@ -323,17 +325,22 @@ def loss_and_grad(
     velocity_sq = velocity**2
     boundary_mask = _build_boundary_mask(config)
     grid_shape = velocity.shape
+
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
 
         source = receivers[shot_index]
-        traces, checkpoint_prevs, checkpoint_currs, wavelet_segments, active_segments = (
-            _simulate_shot_with_checkpoints(
-                velocity,
-                acquisition,
-                config,
-                shot_index,
-            )
+        (
+            traces,
+            checkpoint_prevs,
+            checkpoint_currs,
+            wavelet_segments,
+            active_segments,
+        ) = _simulate_shot_with_checkpoints(
+            velocity,
+            acquisition,
+            config,
+            shot_index,
         )
         residual = traces - observed_shot
 
@@ -357,7 +364,9 @@ def loss_and_grad(
             curr_field, laplacian_curr, data_cotangent, active = xs
 
             def active_reverse(state):
-                active_cotangent_curr, active_cotangent_next, active_grad_velocity = state
+                active_cotangent_curr, active_cotangent_next, active_grad_velocity = (
+                    state
+                )
 
                 # The observation operator samples the next wavefield at receiver
                 # points, so its adjoint scatters those trace-domain cotangents back
@@ -393,17 +402,22 @@ def loss_and_grad(
                 )
                 return (cotangent_prev, active_cotangent_curr, active_grad_velocity)
 
-            return jax.lax.cond(
-                active,
-                active_reverse,
-                lambda state: state,
-                carry,
-            ), None
+            return (
+                jax.lax.cond(
+                    active,
+                    active_reverse,
+                    lambda state: state,
+                    carry,
+                ),
+                None,
+            )
 
         def reverse_segment(carry, xs):
             """Replay one segment then sweep its steps in reverse."""
 
-            checkpoint_prev, checkpoint_curr, source_block, active_block, data_block = xs
+            checkpoint_prev, checkpoint_curr, source_block, active_block, data_block = (
+                xs
+            )
             curr_fields, laplacians = _replay_segment_history(
                 (checkpoint_prev, checkpoint_curr),
                 source,

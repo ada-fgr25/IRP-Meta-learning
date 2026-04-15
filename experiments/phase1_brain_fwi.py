@@ -46,9 +46,7 @@ def parse_args():
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--optimizer", choices=["sgd", "adam", "lbfgsb"], default="sgd"
-    )
+    parser.add_argument("--optimizer", choices=["sgd", "adam", "lbfgsb"], default="sgd")
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--learning-rate", type=float, default=5.0)
     parser.add_argument("--nx", type=int, default=500)
@@ -140,7 +138,9 @@ def _build_random_shot_schedule(
     for n_steps in stage_steps:
         stage_schedule = []
         for _ in range(n_steps):
-            chosen_positions = rng.choice(shot_positions, size=batch_size, replace=False)
+            chosen_positions = rng.choice(
+                shot_positions, size=batch_size, replace=False
+            )
             chosen_positions = np.sort(chosen_positions)
             stage_schedule.append(jnp.asarray(chosen_positions, dtype=jnp.int32))
         schedule.append(tuple(stage_schedule))
