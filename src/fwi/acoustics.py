@@ -91,6 +91,144 @@ def _inject_receivers(
     return jnp.zeros(shape).at[receiver_i, receiver_j].add(receiver_values)
 
 
+def _time_derivative(samples: jnp.ndarray, dt: float) -> jnp.ndarray:
+    """Approximate the first time derivative the way Stride prepares sources.
+
+    Stride uses `np.gradient(..., dt)` when `diff_source=True`. Reproducing the
+    same central-difference stencil here keeps the JAX source preparation close
+    to the reference while remaining compatible with JIT compilation.
+    """
+
+    if samples.shape[0] <= 1:
+        return jnp.zeros_like(samples)
+
+    # `np.gradient` uses one-sided differences at the ends and centred
+    # differences in the interior. The explicit construction keeps that
+    # behaviour readable and avoids depending on NumPy-only helpers.
+    first = (samples[1] - samples[0]) / dt
+    last = (samples[-1] - samples[-2]) / dt
+    middle = (samples[2:] - samples[:-2]) / (2.0 * dt)
+    return jnp.concatenate((first[None], middle, last[None]))
+
+
+def _prepare_source_wavelet(
+    wavelet: jnp.ndarray, config: BrainFWIConfig
+) -> jnp.ndarray:
+    """Convert the acquisition wavelet into the injected source samples.
+
+    The default path mirrors Stride's source preparation:
+    - optionally replace the raw wavelet by its first time derivative
+    - scale the injected sample later using `2 * dt**2 * vp / max(dx, dy)`
+    - divide once more by `dt` when injecting the undifferentiated source
+    """
+
+    if config.solver.diff_source:
+        return _time_derivative(wavelet, config.time.dt)
+    return wavelet
+
+
+def _source_scale(
+    velocity_at_source: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Return the per-shot source scaling used by the Stride Devito kernel."""
+
+    if config.solver.source_scale_mode != "stride":
+        raise ValueError(
+            "Unsupported source scaling mode " f"'{config.solver.source_scale_mode}'."
+        )
+
+    dt = config.time.dt
+    h_max = max(config.grid.dx, config.grid.dy)
+    scale = 2.0 * (dt**2) * velocity_at_source / h_max
+    if not config.solver.diff_source:
+        scale = scale / dt
+    return scale
+
+
+def _spatial_operator(
+    field: jnp.ndarray,
+    velocity_sq: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Evaluate the discrete spatial operator used by the current kernel.
+
+    For `OT2`, this is the familiar `vp**2 * Lap(u)`. For `OT4`, we mirror the
+    Stride `IsoAcousticDevito` correction term and add
+    `dt**2 / 12 * vp**2 * Lap(vp**2 * Lap(u))`.
+    """
+
+    laplacian_2 = velocity_sq * _laplacian(field, config.grid.dx, config.grid.dy)
+    if config.solver.kernel == "OT2":
+        return laplacian_2
+    if config.solver.kernel != "OT4":
+        raise ValueError(f"Unsupported solver kernel '{config.solver.kernel}'.")
+
+    laplacian_4 = velocity_sq * _laplacian(
+        laplacian_2,
+        config.grid.dx,
+        config.grid.dy,
+    )
+    return laplacian_2 + ((config.time.dt**2) / 12.0) * laplacian_4
+
+
+def _propose_next_field(
+    u_prev: jnp.ndarray,
+    u_curr: jnp.ndarray,
+    velocity: jnp.ndarray,
+    source_index: jnp.ndarray,
+    source_sample: jnp.ndarray,
+    boundary_mask: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Apply one discrete wave-equation step before receiver sampling.
+
+    Structuring the forward update as one explicit pure function lets the
+    reverse-time implementation reuse its exact linearisation via `jax.vjp`.
+    That keeps the explicit adjoint aligned with whatever discrete physics the
+    forward solver is using, including Stride-like source scaling and `OT4`.
+    """
+
+    velocity_sq = velocity**2
+    pressure_update = (
+        2.0 * u_curr
+        - u_prev
+        + (config.time.dt**2) * _spatial_operator(u_curr, velocity_sq, config)
+    )
+    scaled_source_sample = source_sample * _source_scale(
+        velocity[source_index[0], source_index[1]],
+        config,
+    )
+    source_update = _inject_source(source_index, scaled_source_sample, velocity.shape)
+    return boundary_mask * (pressure_update + source_update)
+
+
+def _advance_state(
+    u_prev: jnp.ndarray,
+    u_curr: jnp.ndarray,
+    velocity: jnp.ndarray,
+    source_index: jnp.ndarray,
+    source_sample: jnp.ndarray,
+    active: jnp.ndarray,
+    boundary_mask: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Advance the solver state by one step or keep it unchanged if inactive."""
+
+    proposed_u_next = _propose_next_field(
+        u_prev,
+        u_curr,
+        velocity,
+        source_index,
+        source_sample,
+        boundary_mask,
+        config,
+    )
+    u_next = jnp.where(active, proposed_u_next, u_curr)
+    next_prev = jnp.where(active, u_curr, u_prev)
+    return next_prev, u_next
+
+
 def _step_shot_state(
     carry: tuple[jnp.ndarray, jnp.ndarray],
     source_value: jnp.ndarray,
@@ -98,12 +236,9 @@ def _step_shot_state(
     source: jnp.ndarray,
     receiver_i: jnp.ndarray,
     receiver_j: jnp.ndarray,
-    velocity_sq: jnp.ndarray,
+    velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
-    grid_shape: tuple[int, int],
-    dt: float,
-    dx: float,
-    dy: float,
+    config: BrainFWIConfig,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
 ]:
@@ -116,16 +251,18 @@ def _step_shot_state(
     """
 
     u_prev, u_curr = carry
-    lap_curr = _laplacian(u_curr, dx, dy)
-    source_term = _inject_source(source, source_value, grid_shape)
-    proposed_u_next = boundary_mask * (
-        2.0 * u_curr - u_prev + (dt**2) * (velocity_sq * lap_curr + source_term)
+    next_prev, u_next = _advance_state(
+        u_prev,
+        u_curr,
+        velocity,
+        source,
+        source_value,
+        active,
+        boundary_mask,
+        config,
     )
-
-    u_next = jnp.where(active, proposed_u_next, u_curr)
-    next_prev = jnp.where(active, u_curr, u_prev)
     traces = jnp.where(active, u_next[receiver_i, receiver_j], 0.0)
-    return (next_prev, u_next), (traces, u_curr, lap_curr)
+    return (next_prev, u_next), (traces, u_prev, u_curr)
 
 
 def _segment_wavelet(
@@ -171,18 +308,14 @@ def _simulate_shot_with_checkpoints(
     extra compute for a much smaller peak memory footprint.
     """
 
-    dt = config.time.dt
-    dx = config.grid.dx
-    dy = config.grid.dy
     receivers, _, wavelet = acquisition.require_solver_arrays()
     source = receivers[shot_index]
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
     boundary_mask = _build_boundary_mask(config)
-    grid_shape = velocity.shape
-    velocity_sq = velocity**2
+    source_wavelet = _prepare_source_wavelet(wavelet, config)
     wavelet_segments, active_segments = _segment_wavelet(
-        wavelet,
+        source_wavelet,
         config.solver.checkpoint_interval,
     )
 
@@ -199,12 +332,9 @@ def _simulate_shot_with_checkpoints(
                 source,
                 receiver_i,
                 receiver_j,
-                velocity_sq,
+                velocity,
                 boundary_mask,
-                grid_shape,
-                dt,
-                dx,
-                dy,
+                config,
             ),
             carry,
             (source_block, active_block),
@@ -226,18 +356,20 @@ def _replay_segment_history(
     source: jnp.ndarray,
     receiver_i: jnp.ndarray,
     receiver_j: jnp.ndarray,
-    velocity_sq: jnp.ndarray,
+    velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
-    grid_shape: tuple[int, int],
-    dt: float,
-    dx: float,
-    dy: float,
+    config: BrainFWIConfig,
     source_block: jnp.ndarray,
     active_block: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Recompute the current fields and Laplacians for one checkpoint segment."""
+    """Recompute the input states for one checkpoint segment.
 
-    _, (_, curr_fields, laplacians) = jax.lax.scan(
+    The explicit adjoint only needs the `(u_{n-1}, u_n)` pairs that feed each
+    step. Replaying them from sparse checkpoints is much cheaper than storing
+    every wavefield outright.
+    """
+
+    _, (_, prev_fields, curr_fields) = jax.lax.scan(
         lambda state, step_xs: _step_shot_state(
             state,
             step_xs[0],
@@ -245,17 +377,14 @@ def _replay_segment_history(
             source,
             receiver_i,
             receiver_j,
-            velocity_sq,
+            velocity,
             boundary_mask,
-            grid_shape,
-            dt,
-            dx,
-            dy,
+            config,
         ),
         start_carry,
         (source_block, active_block),
     )
-    return curr_fields, laplacians
+    return prev_fields, curr_fields
 
 
 def simulate_shot(
@@ -314,15 +443,12 @@ def loss_and_grad(
     """
 
     dt = config.time.dt
-    dx = config.grid.dx
-    dy = config.grid.dy
     receivers, acquisition_shot_indices, _ = acquisition.require_solver_arrays()
     active_shot_indices = (
         acquisition_shot_indices if shot_indices is None else shot_indices
     )
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
-    velocity_sq = velocity**2
     boundary_mask = _build_boundary_mask(config)
     grid_shape = velocity.shape
 
@@ -360,47 +486,63 @@ def loss_and_grad(
         def reverse_step(carry, xs):
             """Reverse one time step of the discrete wave equation."""
 
-            cotangent_curr, cotangent_next, grad_velocity = carry
-            curr_field, laplacian_curr, data_cotangent, active = xs
+            cotangent_next_prev, cotangent_next_curr, grad_velocity = carry
+            prev_field, curr_field, data_cotangent, active, source_block_value = xs
 
             def active_reverse(state):
-                active_cotangent_curr, active_cotangent_next, active_grad_velocity = (
+                active_cotangent_next_prev, active_cotangent_next_curr, active_grad = (
                     state
                 )
 
                 # The observation operator samples the next wavefield at receiver
-                # points, so its adjoint scatters those trace-domain cotangents back
-                # onto the full grid before the wave-equation reverse step.
-                active_cotangent_next = active_cotangent_next + _inject_receivers(
-                    receiver_i,
-                    receiver_j,
-                    data_cotangent,
-                    grid_shape,
+                # points, so its adjoint adds the trace-domain cotangents to the
+                # second component of the output state `(u_n, u_{n+1})`.
+                active_cotangent_next_curr = (
+                    active_cotangent_next_curr
+                    + _inject_receivers(
+                        receiver_i,
+                        receiver_j,
+                        data_cotangent,
+                        grid_shape,
+                    )
                 )
 
-                # The boundary operator is just a diagonal mask, so it is its own
-                # adjoint. Applying it here mirrors the boundary treatment used in
-                # the forward step.
-                masked_cotangent = boundary_mask * active_cotangent_next
+                # The state transition is treated as a pure function, so we can
+                # reuse JAX's exact linearisation of the discrete forward model.
+                # This keeps the explicit adjoint in lockstep with the solver even
+                # as we change kernels or source scaling details.
+                def state_transition(
+                    step_prev: jnp.ndarray,
+                    step_curr: jnp.ndarray,
+                    step_velocity: jnp.ndarray,
+                ) -> tuple[jnp.ndarray, jnp.ndarray]:
+                    return (
+                        step_curr,
+                        _propose_next_field(
+                            step_prev,
+                            step_curr,
+                            step_velocity,
+                            source,
+                            source_block_value,
+                            boundary_mask,
+                            config,
+                        ),
+                    )
 
-                # The gradient with respect to velocity comes from differentiating
-                # `velocity**2 * laplacian(u_n)` pointwise at each time step.
-                active_grad_velocity = (
-                    active_grad_velocity
-                    + 2.0 * velocity * (dt**2) * masked_cotangent * laplacian_curr
+                (_, _), state_vjp = jax.vjp(
+                    state_transition,
+                    prev_field,
+                    curr_field,
+                    velocity,
                 )
-
-                # Reverse propagation through the explicit second-order update:
-                # - `u_{n-1}` receives `-masked_cotangent`
-                # - `u_n` receives the direct `2 * masked_cotangent` term
-                # - plus the adjoint of the spatial operator
-                cotangent_prev = -masked_cotangent
-                active_cotangent_curr = (
-                    active_cotangent_curr
-                    + 2.0 * masked_cotangent
-                    + (dt**2) * (_laplacian(velocity_sq * masked_cotangent, dx, dy))
+                cotangent_prev, cotangent_curr, velocity_cotangent = state_vjp(
+                    (active_cotangent_next_prev, active_cotangent_next_curr)
                 )
-                return (cotangent_prev, active_cotangent_curr, active_grad_velocity)
+                return (
+                    cotangent_prev,
+                    cotangent_curr,
+                    active_grad + velocity_cotangent,
+                )
 
             return (
                 jax.lax.cond(
@@ -418,17 +560,14 @@ def loss_and_grad(
             checkpoint_prev, checkpoint_curr, source_block, active_block, data_block = (
                 xs
             )
-            curr_fields, laplacians = _replay_segment_history(
+            prev_fields, curr_fields = _replay_segment_history(
                 (checkpoint_prev, checkpoint_curr),
                 source,
                 receiver_i,
                 receiver_j,
-                velocity_sq,
+                velocity,
                 boundary_mask,
-                grid_shape,
-                dt,
-                dx,
-                dy,
+                config,
                 source_block,
                 active_block,
             )
@@ -436,7 +575,13 @@ def loss_and_grad(
             carry, _ = jax.lax.scan(
                 reverse_step,
                 carry,
-                (curr_fields, laplacians, data_block, active_block),
+                (
+                    prev_fields,
+                    curr_fields,
+                    data_block,
+                    active_block,
+                    source_block,
+                ),
                 reverse=True,
             )
             return carry, None

@@ -148,6 +148,9 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
             ("ellipse_scale_y", acq.ellipse_scale_y),
             ("source_frequency_hz", acq.source_frequency_hz),
             ("source_cycles", acq.source_cycles),
+            # Keeping the amplitude explicit in metadata makes it easier to
+            # audit source-normalisation changes when we compare against the
+            # bundled Stride scripts, which do not add a large extra factor.
             ("source_amplitude", acq.source_amplitude),
         ),
     )

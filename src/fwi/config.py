@@ -56,7 +56,7 @@ class AcquisitionConfig:
     ellipse_scale_y: float = 0.85
     source_frequency_hz: float = 2.5e5
     source_cycles: int = 3
-    source_amplitude: float = 1.0e12
+    source_amplitude: float = 1.0
 
 
 @dataclass(frozen=True)
