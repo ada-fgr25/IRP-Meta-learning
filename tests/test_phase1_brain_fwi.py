@@ -17,6 +17,7 @@ from fwi.config import (
     ModelConfig,
     TimeConfig,
 )
+from fwi.optimisers import process_global_gradient_stride_like
 from fwi.problem import (
     build_brain_fwi_problem,
     dldx,
@@ -145,6 +146,50 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot2))))
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot4))))
         self.assertFalse(bool(jnp.allclose(traces_ot2, traces_ot4)))
+
+    def test_stride_like_gradient_processing_masks_normalises_and_smooths(self):
+        """Gradient preprocessing should follow the configured stride-like steps."""
+
+        grad = jnp.zeros((8, 8), dtype=jnp.float32)
+        grad = grad.at[4, 4].set(5.0)
+        grad = grad.at[1, 1].set(2.0)
+
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=1,
+            mask_grad=True,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=True,
+        )
+
+        # A boundary-only impulse should be removed by masking.
+        boundary_grad = jnp.zeros((8, 8), dtype=jnp.float32).at[0, 0].set(3.0)
+        masked_boundary = process_global_gradient_stride_like(
+            boundary_grad,
+            damping_cells=1,
+            mask_grad=True,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        unmasked_boundary = process_global_gradient_stride_like(
+            boundary_grad,
+            damping_cells=1,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        self.assertTrue(bool(jnp.allclose(masked_boundary, 0.0)))
+        self.assertGreater(float(jnp.linalg.norm(unmasked_boundary)), 0.0)
+
+        # Normalisation keeps amplitudes in [-1, 1].
+        self.assertLessEqual(float(jnp.max(jnp.abs(processed))), 1.0 + 1.0e-6)
+
+        # Smoothing spreads the centre impulse to neighbouring cells.
+        self.assertGreater(float(processed[4, 3]), 0.0)
+        self.assertGreater(float(processed[3, 4]), 0.0)
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""

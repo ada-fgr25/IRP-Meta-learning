@@ -29,6 +29,7 @@ The current backend split is now:
 * `stride` backend: benchmark-only orchestration around the tracked reference scripts, but exposed through the same acquisition/problem-facing API so experiments can swap bookkeeping more easily.
 * The JAX Phase 1 driver now also carries a Stride-oriented operating mode by default: benchmark-scale grid/time settings, a `3`-cycle `0.25 MHz` tone-burst source family, Stride-style `0.5 * sum(r^2)` loss scaling, random `32`-shot subsets per iteration, and a `0.1/0.2/0.3 MHz` `f_max` schedule implemented with trace-domain FFT masks.
 * The JAX solver now matches the tracked Stride `IsoAcousticDevito` source handling more closely: default `OT4` time stepping, the same `2 * dt**2 * vp / max(dx, dy)` source scaling, and optional first-derivative source injection through `diff_source`.
+* The JAX optimiser now approximates Stride's default `ProcessGlobalGradient` pipeline by applying masking, smoothing, and normalisation to gradients before SGD/Adam updates, with post-update model clipping retained as the analogue of Stride's `ProcessModelIteration`.
 * The remaining deliberate gaps are still important when interpreting results: the JAX path keeps a simple damping-mask boundary, point-grid interpolation, second-order spatial derivatives, and constant-density/no-attenuation physics rather than reproducing the full Devito operator stack.
 
 ## Local Tracked Benchmark References
