@@ -162,7 +162,8 @@ The core implementation lives directly under `src/fwi/` so imports stay short an
 Parity note:
 
 * The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
-* The JAX path is still an approximation rather than a full Stride reimplementation. In particular, it uses the repository's JAX solver and trace-domain FFT masking to approximate Stride's `f_max` continuation rather than calling Stride's in-process Devito pipeline.
+* The JAX solver now also mirrors several discrete `IsoAcousticDevito` choices more directly: `OT4` time stepping by default, Stride-style source scaling `2 * dt**2 * vp / max(dx, dy)` with optional `diff_source`, and an explicit adjoint built from the exact linearisation of that discrete update.
+* The JAX path is still an approximation rather than a full Stride reimplementation. In particular, it still uses a lightweight diagonal damping mask instead of Stride's boundary operators, point-grid injection instead of Hicks interpolation, second-order spatial finite differences rather than Devito's higher space order, no density/attenuation terms, and trace-domain FFT masking to approximate Stride's `f_max` continuation.
 * Full-grid runs are still demanding. The solver now reduces memory by accumulating shots sequentially and replaying the adjoint in checkpointed time segments, but large benchmark-scale runs may still need smaller shot subsets, smaller checkpoint intervals, or more capable hardware.
 
 ## ▶️ Running The Stride Benchmark

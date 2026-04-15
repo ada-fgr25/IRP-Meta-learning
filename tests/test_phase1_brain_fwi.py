@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 import jax
 import jax.numpy as jnp
 
+from fwi.acoustics import _source_scale
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
@@ -20,6 +22,7 @@ from fwi.problem import (
     dldx,
     forward,
     init_params,
+    loss,
     smooth_traces,
 )
 
@@ -67,8 +70,7 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         explicit_value, explicit_grad = backend.loss_grad(params, params["x0"], auxs)
         autodiff_value, autodiff_grad = jax.value_and_grad(
-            lambda model: jnp.sum((forward(params, model) - auxs[0]) ** 2)
-            / auxs[0].size
+            lambda model: loss(params, model, auxs).sum()
         )(params["x0"])
 
         self.assertTrue(
@@ -98,6 +100,51 @@ class Phase1BrainFWITests(unittest.TestCase):
         meta_grad = jax.grad(squared_grad_norm)(params["x0"])
         self.assertEqual(meta_grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(meta_grad))))
+
+    def test_stride_source_scale_matches_reference_formula(self):
+        """The source scaling should follow the tracked Stride expression."""
+
+        config = _tiny_config()
+        velocity_at_source = jnp.array(1500.0)
+        expected = (
+            2.0
+            * (config.time.dt**2)
+            * velocity_at_source
+            / max(config.grid.dx, config.grid.dy)
+            / config.time.dt
+        )
+
+        self.assertTrue(
+            bool(jnp.isclose(_source_scale(velocity_at_source, config), expected))
+        )
+
+    def test_ot2_and_ot4_produce_distinct_finite_wavefields(self):
+        """The kernel switch should be active and remain numerically stable."""
+
+        base = _tiny_config()
+        ot2_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, kernel="OT2"),
+        )
+        ot4_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, kernel="OT4"),
+        )
+
+        ot2_params = init_params(jax.random.PRNGKey(0), config=ot2_config)
+        ot4_params = init_params(jax.random.PRNGKey(0), config=ot4_config)
+        traces_ot2 = forward(ot2_params, ot2_params["x_exact"])
+        traces_ot4 = forward(ot4_params, ot4_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot2))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot4))))
+        self.assertFalse(bool(jnp.allclose(traces_ot2, traces_ot4)))
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""
