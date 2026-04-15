@@ -34,7 +34,11 @@ from fwi.config import (
 )
 from fwi.filtering import bandlimit_traces
 from fwi.metrics import compute_metrics
-from fwi.optimisers import run_lbfgsb, run_stagewise_optax
+from fwi.optimisers import (
+    process_global_gradient_stride_like,
+    run_lbfgsb,
+    run_stagewise_optax,
+)
 from fwi.problem import dldx, init_params
 
 
@@ -60,6 +64,36 @@ def parse_args():
         type=int,
         default=32,
         help="Number of time steps to replay per adjoint checkpoint segment.",
+    )
+    parser.add_argument(
+        "--stride-grad-processing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply a Stride-like global gradient processing pipeline before updates.",
+    )
+    parser.add_argument(
+        "--mask-grad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Zero gradients in the absorbing frame before applying the update.",
+    )
+    parser.add_argument(
+        "--smooth-grad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply spatial smoothing to gradients before applying the update.",
+    )
+    parser.add_argument(
+        "--norm-grad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Normalise gradient amplitudes before applying the update.",
+    )
+    parser.add_argument(
+        "--grad-smooth-radius",
+        type=int,
+        default=2,
+        help="Smoothing radius used when --smooth-grad is enabled.",
     )
     parser.add_argument(
         "--max-freqs-hz",
@@ -110,7 +144,14 @@ def build_config(args) -> BrainFWIConfig:
             n_shots=args.n_shots,
         ),
         model=ModelConfig(),
-        solver=SolverConfig(checkpoint_interval=args.checkpoint_interval),
+        solver=SolverConfig(
+            checkpoint_interval=args.checkpoint_interval,
+            stride_grad_processing=args.stride_grad_processing,
+            mask_grad=args.mask_grad,
+            smooth_grad=args.smooth_grad,
+            norm_grad=args.norm_grad,
+            grad_smooth_radius=args.grad_smooth_radius,
+        ),
     )
 
 
@@ -545,6 +586,27 @@ def main():
             output_dir=args.output_dir,
         )
 
+    def process_grad_fn(
+        model: jnp.ndarray,
+        grad: jnp.ndarray,
+        stage_index: int,
+        step_index: int,
+    ) -> jnp.ndarray:
+        """Apply the configured Stride-like gradient preprocessing stack."""
+
+        del model, stage_index, step_index
+        if not config.solver.stride_grad_processing:
+            return grad
+
+        return process_global_gradient_stride_like(
+            grad,
+            damping_cells=config.solver.damping_cells,
+            mask_grad=config.solver.mask_grad,
+            smooth_grad=config.solver.smooth_grad,
+            smooth_radius=config.solver.grad_smooth_radius,
+            norm_grad=config.solver.norm_grad,
+        )
+
     if args.optimizer == "sgd":
         x_hat, history, final_loss, snapshots = run_stagewise_optax(
             x0,
@@ -554,6 +616,7 @@ def main():
             bounds,
             true_model=x_exact,
             make_step_loss_grad_fn=make_step_loss_grad_fn,
+            process_grad_fn=process_grad_fn,
             progress_callback=progress_callback,
             step_callback=step_callback,
         )
@@ -566,6 +629,7 @@ def main():
             bounds,
             true_model=x_exact,
             make_step_loss_grad_fn=make_step_loss_grad_fn,
+            process_grad_fn=process_grad_fn,
             progress_callback=progress_callback,
             step_callback=step_callback,
         )
@@ -594,6 +658,11 @@ def main():
     metrics["shots_per_iter"] = args.shots_per_iter
     metrics["seed"] = args.seed
     metrics["checkpoint_interval"] = config.solver.checkpoint_interval
+    metrics["stride_grad_processing"] = config.solver.stride_grad_processing
+    metrics["mask_grad"] = config.solver.mask_grad
+    metrics["smooth_grad"] = config.solver.smooth_grad
+    metrics["norm_grad"] = config.solver.norm_grad
+    metrics["grad_smooth_radius"] = config.solver.grad_smooth_radius
     metrics["initial_model_rmse"] = float(
         jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
     )
@@ -658,6 +727,14 @@ def main():
     print(f"Max frequencies (Hz): {max_freqs_hz}")
     print(f"Random shots per iteration: {args.shots_per_iter}")
     print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
+    print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
+    print(
+        "Grad pipeline (mask/smooth/norm, radius): "
+        f"{config.solver.mask_grad}/"
+        f"{config.solver.smooth_grad}/"
+        f"{config.solver.norm_grad}, "
+        f"{config.solver.grad_smooth_radius}"
+    )
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")

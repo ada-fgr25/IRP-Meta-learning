@@ -101,6 +101,11 @@ class SolverConfig:
     implementation does.
     `diff_source` mirrors Stride's optional behaviour of injecting the first
     time derivative of the source wavelet instead of the raw wavelet.
+    `stride_grad_processing` toggles a JAX approximation of Stride's default
+    `ProcessGlobalGradient` pipeline before each optimiser update.
+    `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
+    processing switches. `grad_smooth_radius` controls the spatial radius of
+    the smoothing kernel when `smooth_grad` is enabled.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -111,6 +116,11 @@ class SolverConfig:
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
     diff_source: bool = False
+    stride_grad_processing: bool = True
+    mask_grad: bool = True
+    smooth_grad: bool = True
+    norm_grad: bool = True
+    grad_smooth_radius: int = 2
     checkpoint_interval: int = 32
 
 
