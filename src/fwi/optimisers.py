@@ -170,6 +170,9 @@ def run_stagewise_optax(
     bounds: tuple[float, float],
     true_model: Array | None = None,
     snapshot_steps: tuple[int, ...] = (0, 10, 20),
+    make_step_loss_grad_fn: (
+        Callable[[int, int], Callable[[Array], tuple[Array, Array]]] | None
+    ) = None,
 ):
     """Run an Optax optimiser across multiple continuation stages.
 
@@ -190,8 +193,17 @@ def run_stagewise_optax(
         optimiser = optimiser_factory()
         state = optimiser.init(model)
 
-        for _ in range(n_steps):
-            loss_value, grad = loss_grad_fn(model)
+        for step_in_stage in range(n_steps):
+            # The default path reuses one loss for the whole stage. When a
+            # caller provides `make_step_loss_grad_fn`, each iteration can swap
+            # in a different stochastic shot subset while still sharing the
+            # same optimiser loop and history bookkeeping.
+            active_loss_grad_fn = (
+                loss_grad_fn
+                if make_step_loss_grad_fn is None
+                else make_step_loss_grad_fn(stage_index, step_in_stage)
+            )
+            loss_value, grad = active_loss_grad_fn(model)
             updates, state = optimiser.update(grad, state, model)
             model = optax.apply_updates(model, updates)
             model = _project_velocity(model, bounds)

@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 import optax
 
 # Point Matplotlib at a writable cache directory to avoid noisy warnings in
@@ -32,7 +34,7 @@ from fwi.config import (
 )
 from fwi.metrics import compute_metrics
 from fwi.optimisers import run_lbfgsb, run_stagewise_optax
-from fwi.problem import dldx, init_params, smooth_traces
+from fwi.problem import dldx, init_params
 
 
 def parse_args():
@@ -44,22 +46,28 @@ def parse_args():
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--optimizer", choices=["sgd", "adam", "lbfgsb"], default="adam"
-    )
-    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--optimizer", choices=["sgd", "adam", "lbfgsb"], default="sgd")
+    parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--learning-rate", type=float, default=5.0)
-    parser.add_argument("--nx", type=int, default=96)
-    parser.add_argument("--ny", type=int, default=72)
-    parser.add_argument("--nt", type=int, default=320)
-    parser.add_argument("--n-transducers", type=int, default=48)
-    parser.add_argument("--n-shots", type=int, default=24)
+    parser.add_argument("--nx", type=int, default=500)
+    parser.add_argument("--ny", type=int, default=370)
+    parser.add_argument("--nt", type=int, default=2500)
+    parser.add_argument("--n-transducers", type=int, default=256)
+    parser.add_argument("--n-shots", type=int, default=256)
     parser.add_argument(
-        "--continuation-radii",
-        type=str,
-        default="12,6,0",
-        help="Comma-separated time-smoothing radii for coarse-to-fine continuation.",
+        "--checkpoint-interval",
+        type=int,
+        default=32,
+        help="Number of time steps to replay per adjoint checkpoint segment.",
     )
+    parser.add_argument(
+        "--max-freqs-hz",
+        type=str,
+        default="100000,200000,300000",
+        help="Comma-separated stage cutoffs for Stride-style frequency continuation.",
+    )
+    parser.add_argument("--shots-per-iter", type=int, default=32)
+    parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -89,16 +97,16 @@ def build_config(args) -> BrainFWIConfig:
             n_shots=args.n_shots,
         ),
         model=ModelConfig(),
-        solver=SolverConfig(),
+        solver=SolverConfig(checkpoint_interval=args.checkpoint_interval),
     )
 
 
-def _parse_continuation_radii(text: str) -> tuple[int, ...]:
-    """Parse a comma-separated continuation schedule."""
+def _parse_frequency_schedule(text: str) -> tuple[float, ...]:
+    """Parse a comma-separated Stride-style `f_max` schedule in Hertz."""
 
     if not text.strip():
-        return (0,)
-    return tuple(int(part.strip()) for part in text.split(","))
+        return (np.inf,)
+    return tuple(float(part.strip()) for part in text.split(","))
 
 
 def _split_steps(total_steps: int, n_stages: int) -> tuple[int, ...]:
@@ -107,6 +115,37 @@ def _split_steps(total_steps: int, n_stages: int) -> tuple[int, ...]:
     base = total_steps // n_stages
     remainder = total_steps % n_stages
     return tuple(base + (1 if i < remainder else 0) for i in range(n_stages))
+
+
+def _build_random_shot_schedule(
+    available_shots: jnp.ndarray,
+    stage_steps: tuple[int, ...],
+    shots_per_iter: int,
+    seed: int,
+) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    """Pre-sample one deterministic random shot subset for each iteration.
+
+    Stride's inverse benchmark chooses `32` shots randomly on every iteration.
+    We precompute that schedule once so the run is reproducible and so each
+    optimiser step sees a stable subset if its loss is evaluated multiple times.
+    """
+
+    rng = np.random.default_rng(seed)
+    shot_positions = np.arange(int(available_shots.shape[0]), dtype=np.int32)
+    batch_size = min(int(shots_per_iter), int(available_shots.shape[0]))
+    schedule = []
+
+    for n_steps in stage_steps:
+        stage_schedule = []
+        for _ in range(n_steps):
+            chosen_positions = rng.choice(
+                shot_positions, size=batch_size, replace=False
+            )
+            chosen_positions = np.sort(chosen_positions)
+            stage_schedule.append(jnp.asarray(chosen_positions, dtype=jnp.int32))
+        schedule.append(tuple(stage_schedule))
+
+    return tuple(schedule)
 
 
 def _shared_limits(images):
@@ -203,20 +242,32 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     config = build_config(args)
-    continuation_radii = _parse_continuation_radii(args.continuation_radii)
-    stage_steps = _split_steps(args.steps, len(continuation_radii))
-    key = jax.random.PRNGKey(0)
+    max_freqs_hz = _parse_frequency_schedule(args.max_freqs_hz)
+    stage_steps = _split_steps(args.steps, len(max_freqs_hz))
+    key = jax.random.PRNGKey(args.seed)
     params = init_params(key, config=config, backend_name="jax")
     config = params["config"]
     x0, auxs, x_exact = params["x0"], (params["y_obs"],), params["x_exact"]
     bounds = (config.model.min_velocity, config.model.max_velocity)
-
-    filtered_obs = tuple(
-        smooth_traces(auxs[0], radius) for radius in continuation_radii
+    all_shot_indices = params["acquisition"].require_solver_arrays()[1]
+    shot_schedule = _build_random_shot_schedule(
+        all_shot_indices,
+        stage_steps,
+        args.shots_per_iter,
+        args.seed,
     )
 
     def make_loss_grad_fn(stage_index: int):
-        stage_auxs = (filtered_obs[stage_index],)
+        stage_auxs = (auxs[0], max_freqs_hz[stage_index])
+        return jax.jit(lambda model: dldx(params, model, stage_auxs))
+
+    def make_step_loss_grad_fn(stage_index: int, step_index: int):
+        shot_positions = shot_schedule[stage_index][step_index]
+        stage_auxs = (
+            auxs[0][shot_positions],
+            max_freqs_hz[stage_index],
+            all_shot_indices[shot_positions],
+        )
         return jax.jit(lambda model: dldx(params, model, stage_auxs))
 
     if args.optimizer == "sgd":
@@ -227,6 +278,7 @@ def main():
             stage_steps,
             bounds,
             true_model=x_exact,
+            make_step_loss_grad_fn=make_step_loss_grad_fn,
         )
     elif args.optimizer == "adam":
         x_hat, history, final_loss, snapshots = run_stagewise_optax(
@@ -236,9 +288,10 @@ def main():
             stage_steps,
             bounds,
             true_model=x_exact,
+            make_step_loss_grad_fn=make_step_loss_grad_fn,
         )
     else:
-        loss_grad_fn = make_loss_grad_fn(len(continuation_radii) - 1)
+        loss_grad_fn = make_loss_grad_fn(len(max_freqs_hz) - 1)
         x_hat, history, final_loss, snapshots = run_lbfgsb(
             x0,
             loss_grad_fn,
@@ -257,8 +310,11 @@ def main():
     metrics["n_shots"] = config.acquisition.n_shots
     metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
     metrics["model_source"] = config.model.source
-    metrics["continuation_radii"] = list(continuation_radii)
+    metrics["max_freqs_hz"] = list(max_freqs_hz)
     metrics["stage_steps"] = list(stage_steps)
+    metrics["shots_per_iter"] = args.shots_per_iter
+    metrics["seed"] = args.seed
+    metrics["checkpoint_interval"] = config.solver.checkpoint_interval
     metrics["initial_model_rmse"] = float(
         jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
     )
@@ -319,7 +375,9 @@ def main():
         f"{config.acquisition.n_shots} shots, "
         f"{config.acquisition.n_transducers} transducers"
     )
-    print(f"Continuation radii: {continuation_radii}")
+    print(f"Max frequencies (Hz): {max_freqs_hz}")
+    print(f"Random shots per iteration: {args.shots_per_iter}")
+    print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")

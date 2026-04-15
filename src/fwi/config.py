@@ -19,8 +19,8 @@ class GridConfig:
     `dx` and `dy` are the physical spacing between cells in metres.
     """
 
-    nx: int = 96
-    ny: int = 72
+    nx: int = 500
+    ny: int = 370
     dx: float = 5.0e-4
     dy: float = 5.0e-4
 
@@ -34,8 +34,8 @@ class TimeConfig:
     window available to capture arrivals.
     """
 
-    dt: float = 1.0e-7
-    nt: int = 320
+    dt: float = 8.0e-8
+    nt: int = 2500
 
 
 @dataclass(frozen=True)
@@ -43,17 +43,19 @@ class AcquisitionConfig:
     """Stride-inspired elliptical transducer geometry.
 
     The transducers sit on an ellipse around the head to mimic the broad shape
-    of the Stride brain-ultrasound example. `n_shots` selects a subset of those
-    transducers as emitters. We now default to a denser survey than the first
-    prototype because sparse illumination made the internal anomalies almost
-    invisible to the optimiser.
+    of the Stride brain-ultrasound example. By default the JAX path now adopts
+    the same `256` transducer ring as the tracked Stride scripts and uses the
+    full ring as the available shot pool. Per-iteration random shot subsets are
+    selected later by the optimiser loop rather than being baked into this
+    static acquisition description.
     """
 
-    n_transducers: int = 48
-    n_shots: int = 24
+    n_transducers: int = 256
+    n_shots: int = 256
     ellipse_scale_x: float = 0.90
     ellipse_scale_y: float = 0.85
     source_frequency_hz: float = 2.5e5
+    source_cycles: int = 3
     source_amplitude: float = 1.0e12
 
 
@@ -88,10 +90,14 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
+    `checkpoint_interval` controls how many time steps of forward history are
+    recomputed at once during the explicit adjoint. Smaller values reduce peak
+    memory at the cost of more recomputation.
     """
 
-    damping_cells: int = 10
+    damping_cells: int = 40
     damping_strength: float = 0.015
+    checkpoint_interval: int = 32
 
 
 @dataclass(frozen=True)

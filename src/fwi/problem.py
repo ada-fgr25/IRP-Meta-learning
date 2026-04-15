@@ -15,6 +15,7 @@ import jax.numpy as jnp
 
 from .backends import build_backend
 from .config import BrainFWIConfig
+from .filtering import bandlimit_traces
 from .phantoms import build_initial_velocity, build_true_brain_velocity
 
 
@@ -161,7 +162,7 @@ def build_brain_fwi_problem(
     )
 
 
-def forward(params, x):
+def forward(params, x, shot_indices: jnp.ndarray | None = None):
     """Run the configured forward model for a candidate velocity field.
 
     `x` is a velocity model candidate and the result is a full simulated data
@@ -169,20 +170,30 @@ def forward(params, x):
     """
 
     backend = build_backend(params["backend_name"])
-    return backend.forward(x, params["acquisition"], params["config"])
+    return backend.forward(
+        x,
+        params["acquisition"],
+        params["config"],
+        shot_indices=shot_indices,
+    )
 
 
 def loss(params, x, auxs):
     """Data-fidelity term used for classical FWI optimisation.
 
-    For Phase 1 we use a plain mean-squared error between predicted and observed
-    traces. That keeps the baseline simple before we explore more robust losses
-    or multi-scale strategies.
+    `auxs` carries the observed data and, optionally, the current `f_max`
+    cutoff for Stride-style band-limited continuation. The scalar objective now
+    mirrors the tracked Stride loss more closely by using `0.5 * sum(r^2)`
+    rather than a mean-squared normalisation.
     """
 
     y_obs = auxs[0]
-    y = forward(params, x)
-    return jnp.mean((y - y_obs) ** 2).reshape((1,))
+    f_max_hz = auxs[1] if len(auxs) > 1 else None
+    shot_indices = auxs[2] if len(auxs) > 2 else None
+    y = forward(params, x, shot_indices=shot_indices)
+    residual = y - y_obs
+    residual = bandlimit_traces(residual, params["config"].time.dt, f_max_hz)
+    return (0.5 * jnp.sum(residual**2)).reshape((1,))
 
 
 def smooth_traces(traces: jnp.ndarray, radius: int) -> jnp.ndarray:
