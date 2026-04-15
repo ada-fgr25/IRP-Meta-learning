@@ -173,6 +173,7 @@ def run_stagewise_optax(
     make_step_loss_grad_fn: (
         Callable[[int, int], Callable[[Array], tuple[Array, Array]]] | None
     ) = None,
+    progress_callback: Callable[[dict[str, float]], None] | None = None,
 ):
     """Run an Optax optimiser across multiple continuation stages.
 
@@ -188,6 +189,16 @@ def run_stagewise_optax(
     for stage_index, n_steps in enumerate(stage_steps):
         if n_steps <= 0:
             continue
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "stage_start",
+                    "stage": float(stage_index),
+                    "n_steps": float(n_steps),
+                    "global_step": float(global_step),
+                }
+            )
 
         loss_grad_fn = make_loss_grad_fn(stage_index)
         optimiser = optimiser_factory()
@@ -210,7 +221,12 @@ def run_stagewise_optax(
 
             metrics = _step_metrics(global_step, model, loss_value, true_model)
             metrics["stage"] = float(stage_index)
+            metrics["step_in_stage"] = float(step_in_stage)
+            metrics["n_steps_in_stage"] = float(n_steps)
             history.append(metrics)
+
+            if progress_callback is not None:
+                progress_callback(dict(metrics))
 
             global_step += 1
             if global_step in snapshot_steps:

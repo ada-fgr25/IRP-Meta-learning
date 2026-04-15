@@ -78,6 +78,12 @@ def parse_args():
         action="store_true",
         help="Display the reconstruction figure in an interactive window as well as saving it.",
     )
+    parser.add_argument(
+        "--print-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print live optimisation progress (stage/step/loss/shot batch).",
+    )
     return parser.parse_args()
 
 
@@ -257,6 +263,42 @@ def main():
         args.seed,
     )
 
+    def progress_callback(event: dict[str, float]) -> None:
+        """Print compact progress lines so long runs are easier to monitor."""
+
+        if not args.print_progress:
+            return
+
+        if event.get("event") == "stage_start":
+            stage = int(event["stage"]) + 1
+            n_stages = len(stage_steps)
+            n_steps_in_stage = int(event["n_steps"])
+            stage_fmax_hz = max_freqs_hz[stage - 1]
+            print(
+                f"[stage {stage}/{n_stages}] start | "
+                f"f_max={stage_fmax_hz:.0f} Hz | "
+                f"steps={n_steps_in_stage}",
+                flush=True,
+            )
+            return
+
+        stage_zero_based = int(event["stage"])
+        stage = stage_zero_based + 1
+        step_in_stage = int(event["step_in_stage"]) + 1
+        n_steps_in_stage = int(event["n_steps_in_stage"])
+        global_step = int(event["step"]) + 1
+        shot_batch_size = int(
+            shot_schedule[stage_zero_based][step_in_stage - 1].shape[0]
+        )
+        loss_value = float(event["loss"])
+        print(
+            f"[stage {stage}/{len(stage_steps)} step {step_in_stage}/{n_steps_in_stage}] "
+            f"global_step={global_step} | "
+            f"shots={shot_batch_size} | "
+            f"loss={loss_value:.6e}",
+            flush=True,
+        )
+
     def make_loss_grad_fn(stage_index: int):
         stage_auxs = (auxs[0], max_freqs_hz[stage_index])
         return jax.jit(lambda model: dldx(params, model, stage_auxs))
@@ -279,6 +321,7 @@ def main():
             bounds,
             true_model=x_exact,
             make_step_loss_grad_fn=make_step_loss_grad_fn,
+            progress_callback=progress_callback,
         )
     elif args.optimizer == "adam":
         x_hat, history, final_loss, snapshots = run_stagewise_optax(
@@ -289,6 +332,7 @@ def main():
             bounds,
             true_model=x_exact,
             make_step_loss_grad_fn=make_step_loss_grad_fn,
+            progress_callback=progress_callback,
         )
     else:
         loss_grad_fn = make_loss_grad_fn(len(max_freqs_hz) - 1)
