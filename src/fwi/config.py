@@ -90,6 +90,17 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
+    `kernel` selects the time-stepping family used by the JAX solver. `OT4`
+    mirrors Stride's default more closely by adding the standard fourth-order
+    temporal correction on top of the spatial operator, while `OT2` keeps the
+    simpler second-order update available for debugging or ablations.
+    `source_scale_mode` controls how the source sample is converted into a
+    pressure update. The default `stride` mode follows the Stride
+    `IsoAcousticDevito` scaling `2 * dt**2 * vp / max(dx, dy)` and, unless
+    `diff_source` is enabled, divides once more by `dt` exactly as the Devito
+    implementation does.
+    `diff_source` mirrors Stride's optional behaviour of injecting the first
+    time derivative of the source wavelet instead of the raw wavelet.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -97,6 +108,9 @@ class SolverConfig:
 
     damping_cells: int = 40
     damping_strength: float = 0.015
+    kernel: str = "OT4"
+    source_scale_mode: str = "stride"
+    diff_source: bool = False
     checkpoint_interval: int = 32
 
 
