@@ -32,6 +32,7 @@ from fwi.config import (
     SolverConfig,
     TimeConfig,
 )
+from fwi.filtering import bandlimit_traces
 from fwi.metrics import compute_metrics
 from fwi.optimisers import run_lbfgsb, run_stagewise_optax
 from fwi.problem import dldx, init_params
@@ -83,6 +84,12 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Print live optimisation progress (stage/step/loss/shot batch).",
+    )
+    parser.add_argument(
+        "--first-iter-diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save misfit/gradient/update diagnostics for the very first iteration.",
     )
     return parser.parse_args()
 
@@ -241,6 +248,211 @@ def _plot_history(history: list[dict[str, float]], path: Path) -> None:
     plt.close(figure)
 
 
+def _save_first_iteration_diagnostics(
+    *,
+    args,
+    params: dict[str, object],
+    model: jnp.ndarray,
+    true_model: jnp.ndarray,
+    observed_data: jnp.ndarray,
+    all_shot_indices: jnp.ndarray,
+    shot_schedule: tuple[tuple[jnp.ndarray, ...], ...],
+    max_freqs_hz: tuple[float, ...],
+    bounds: tuple[float, float],
+    output_dir: Path,
+) -> None:
+    """Persist first-step diagnostics so model stagnation is easy to inspect.
+
+    The goal is to make one optimiser step fully transparent:
+    - data-space mismatch (misfit) for the exact first batch
+    - model-space gradient driving the update
+    - actual update direction applied by the chosen optimiser
+    - pointwise relation between model error and the first-step gradient
+    """
+
+    if (
+        args.optimizer in {"sgd", "adam"}
+        and len(shot_schedule)
+        and len(shot_schedule[0])
+    ):
+        stage_index = 0
+        step_index = 0
+        shot_positions = shot_schedule[stage_index][step_index]
+        active_shot_indices = all_shot_indices[shot_positions]
+        fmax_hz = max_freqs_hz[stage_index]
+        observed_batch = observed_data[shot_positions]
+    else:
+        # L-BFGS-B and fallback cases use a deterministic full-data view.
+        stage_index = max(len(max_freqs_hz) - 1, 0)
+        step_index = 0
+        active_shot_indices = all_shot_indices
+        fmax_hz = max_freqs_hz[stage_index]
+        observed_batch = observed_data
+
+    auxs = (observed_batch, fmax_hz, active_shot_indices)
+    modelled_batch = simulate_survey(
+        model,
+        params["acquisition"],
+        params["config"],
+        shot_indices=active_shot_indices,
+    )
+    residual = bandlimit_traces(
+        modelled_batch - observed_batch,
+        params["config"].time.dt,
+        fmax_hz,
+    )
+
+    loss_value, grad = dldx(params, model, auxs)
+    if args.optimizer == "sgd":
+        optimiser = optax.sgd(learning_rate=args.learning_rate)
+        opt_state = optimiser.init(model)
+        updates, _ = optimiser.update(grad, opt_state, model)
+        model_next = jnp.clip(
+            optax.apply_updates(model, updates),
+            bounds[0],
+            bounds[1],
+        )
+        update_direction = model_next - model
+    elif args.optimizer == "adam":
+        optimiser = optax.adam(learning_rate=args.learning_rate)
+        opt_state = optimiser.init(model)
+        updates, _ = optimiser.update(grad, opt_state, model)
+        model_next = jnp.clip(
+            optax.apply_updates(model, updates),
+            bounds[0],
+            bounds[1],
+        )
+        update_direction = model_next - model
+    else:
+        # L-BFGS-B does not expose a single fixed first-step update map through
+        # this wrapper, so we visualise the steepest-descent direction instead.
+        update_direction = -grad
+
+    grad_norm = float(jnp.linalg.norm(grad))
+    update_norm = float(jnp.linalg.norm(update_direction))
+    residual_norm = float(jnp.linalg.norm(residual))
+    grad_update_dot = float(jnp.vdot(grad, update_direction))
+    descent_cosine = grad_update_dot / max(grad_norm * update_norm, 1.0e-20)
+
+    diagnostics = {
+        "optimizer": args.optimizer,
+        "stage_index": stage_index,
+        "step_index": step_index,
+        "shots_in_batch": int(active_shot_indices.shape[0]),
+        "fmax_hz": float(fmax_hz),
+        "loss": float(jnp.asarray(loss_value).reshape(())),
+        "gradient_l2_norm": grad_norm,
+        "update_l2_norm": update_norm,
+        "misfit_l2_norm": residual_norm,
+        "grad_update_dot": grad_update_dot,
+        "descent_cosine": float(descent_cosine),
+    }
+
+    diagnostics_path = output_dir / f"{args.optimizer}_first_iter_diagnostics.json"
+    with diagnostics_path.open("w", encoding="utf-8") as fh:
+        json.dump(diagnostics, fh, indent=2)
+
+    model_np = np.asarray(model)
+    model_error_np = np.asarray(true_model - model)
+    grad_np = np.asarray(grad)
+    update_np = np.asarray(update_direction)
+    residual_first_shot = np.asarray(residual[0])
+    grad_error_alignment_np = np.asarray(grad * (true_model - model))
+
+    model_vmin, model_vmax = _shared_limits([model_np])
+    model_error_vmin, model_error_vmax = _symmetric_limits([model_error_np])
+    grad_vmin, grad_vmax = _symmetric_limits([grad_np])
+    update_vmin, update_vmax = _symmetric_limits([update_np])
+    alignment_vmin, alignment_vmax = _symmetric_limits([grad_error_alignment_np])
+
+    figure = plt.figure(figsize=(18, 9))
+    axes = figure.subplots(2, 3)
+
+    im0 = axes[0, 0].imshow(
+        model_np.T,
+        origin="lower",
+        cmap="viridis",
+        vmin=model_vmin,
+        vmax=model_vmax,
+    )
+    figure.colorbar(im0, ax=axes[0, 0])
+    axes[0, 0].set_title("Initial model x0")
+
+    im1 = axes[0, 1].imshow(
+        grad_np.T,
+        origin="lower",
+        cmap="coolwarm",
+        vmin=grad_vmin,
+        vmax=grad_vmax,
+    )
+    figure.colorbar(im1, ax=axes[0, 1])
+    axes[0, 1].set_title("First-step gradient")
+
+    im2 = axes[1, 0].imshow(
+        update_np.T,
+        origin="lower",
+        cmap="coolwarm",
+        vmin=update_vmin,
+        vmax=update_vmax,
+    )
+    figure.colorbar(im2, ax=axes[1, 0])
+    axes[1, 0].set_title("First-step update direction")
+
+    im3 = axes[1, 1].imshow(
+        residual_first_shot.T,
+        origin="lower",
+        cmap="coolwarm",
+        aspect="auto",
+    )
+    figure.colorbar(im3, ax=axes[1, 1])
+    axes[1, 1].set_title("First-shot residual (time x receiver)")
+    axes[1, 1].set_xlabel("Time sample")
+    axes[1, 1].set_ylabel("Receiver index")
+
+    im4 = axes[0, 2].imshow(
+        model_error_np.T,
+        origin="lower",
+        cmap="coolwarm",
+        vmin=model_error_vmin,
+        vmax=model_error_vmax,
+    )
+    figure.colorbar(im4, ax=axes[0, 2])
+    axes[0, 2].set_title("Model error (x_exact - x0)")
+
+    im5 = axes[1, 2].imshow(
+        grad_error_alignment_np.T,
+        origin="lower",
+        cmap="coolwarm",
+        vmin=alignment_vmin,
+        vmax=alignment_vmax,
+    )
+    figure.colorbar(im5, ax=axes[1, 2])
+    axes[1, 2].set_title("Pointwise alignment g*(x_exact - x0)")
+
+    figure.suptitle(
+        "First iteration diagnostics | "
+        f"loss={diagnostics['loss']:.4e} | "
+        f"||g||={grad_norm:.4e} | "
+        f"||du||={update_norm:.4e} | "
+        f"cos(g,du)={descent_cosine:.4f}",
+        fontsize=11,
+    )
+    figure.tight_layout()
+
+    diagnostics_plot_path = output_dir / f"{args.optimizer}_first_iter_diagnostics.png"
+    figure.savefig(diagnostics_plot_path, dpi=160)
+    plt.close(figure)
+
+    print(
+        f"Saved first-iteration diagnostics JSON to: {diagnostics_path}",
+        flush=True,
+    )
+    print(
+        f"Saved first-iteration diagnostics plot to: {diagnostics_plot_path}",
+        flush=True,
+    )
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -262,6 +474,20 @@ def main():
         args.shots_per_iter,
         args.seed,
     )
+
+    if args.first_iter_diagnostics:
+        _save_first_iteration_diagnostics(
+            args=args,
+            params=params,
+            model=x0,
+            true_model=x_exact,
+            observed_data=auxs[0],
+            all_shot_indices=all_shot_indices,
+            shot_schedule=shot_schedule,
+            max_freqs_hz=max_freqs_hz,
+            bounds=bounds,
+            output_dir=args.output_dir,
+        )
 
     def progress_callback(event: dict[str, float]) -> None:
         """Print compact progress lines so long runs are easier to monitor."""
