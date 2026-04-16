@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+import tempfile
 import unittest
 
 import jax
@@ -25,6 +27,10 @@ from fwi.problem import (
     init_params,
     loss,
     smooth_traces,
+)
+from experiments.phase1_brain_fwi import (
+    _format_shot_ids_for_log,
+    _write_run_complete_marker,
 )
 
 
@@ -272,6 +278,41 @@ class Phase1BrainFWITests(unittest.TestCase):
                 jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
             )
         )
+
+    def test_shot_progress_formatter_compacts_long_batches(self):
+        """Shot progress logging should keep long source lists readable."""
+
+        compact = _format_shot_ids_for_log(jnp.array([1, 2, 3], dtype=jnp.int32))
+        self.assertEqual(compact, "[1, 2, 3]")
+
+        long_preview = _format_shot_ids_for_log(
+            jnp.arange(16, dtype=jnp.int32),
+            max_items=6,
+        )
+        self.assertIn("(total=16)", long_preview)
+        self.assertIn("...", long_preview)
+
+    def test_run_complete_marker_writes_expected_artifact(self):
+        """Completion marker should be created with artifact references."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            marker = _write_run_complete_marker(
+                output_dir,
+                "sgd",
+                steps=24,
+                max_freqs_hz=(100000.0, 200000.0, 300000.0),
+                metrics_path=output_dir / "sgd_metrics.json",
+                history_path=output_dir / "sgd_history.json",
+                reconstruction_path=output_dir / "sgd_reconstruction.png",
+                history_plot_path=output_dir / "sgd_history.png",
+            )
+
+            self.assertTrue(marker.exists())
+            payload = marker.read_text(encoding="utf-8")
+            self.assertIn('"status": "completed"', payload)
+            self.assertIn('"optimizer": "sgd"', payload)
+            self.assertIn('"steps": 24', payload)
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""

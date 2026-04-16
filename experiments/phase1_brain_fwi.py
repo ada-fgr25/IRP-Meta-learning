@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import jax
@@ -166,6 +167,15 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Print live optimisation progress (stage/step/loss/shot batch).",
+    )
+    parser.add_argument(
+        "--print-shot-progress",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Print active source/shot IDs for each step before the batched "
+            "forward+adjoint run."
+        ),
     )
     parser.add_argument(
         "--first-iter-diagnostics",
@@ -523,6 +533,49 @@ def _diagnostic_steps_for_stage(n_steps: int) -> dict[int, str]:
     return mapping
 
 
+def _format_shot_ids_for_log(shot_ids: jnp.ndarray, max_items: int = 8) -> str:
+    """Build a compact preview string for active source/shot IDs."""
+
+    values = [int(v) for v in jnp.asarray(shot_ids).tolist()]
+    if len(values) <= max_items:
+        return str(values)
+    head_count = max_items // 2
+    tail_count = max_items - head_count
+    return f"{values[:head_count]} ... {values[-tail_count:]} (total={len(values)})"
+
+
+def _write_run_complete_marker(
+    output_dir: Path,
+    optimizer: str,
+    *,
+    steps: int,
+    max_freqs_hz: tuple[float, ...],
+    metrics_path: Path,
+    history_path: Path,
+    reconstruction_path: Path,
+    history_plot_path: Path,
+) -> Path:
+    """Persist an explicit completion marker for long WSL runs."""
+
+    marker_path = output_dir / f"{optimizer}_RUN_COMPLETE.json"
+    payload = {
+        "status": "completed",
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "optimizer": optimizer,
+        "steps": int(steps),
+        "max_freqs_hz": [float(v) for v in max_freqs_hz],
+        "artifacts": {
+            "metrics_json": str(metrics_path),
+            "history_json": str(history_path),
+            "reconstruction_png": str(reconstruction_path),
+            "history_png": str(history_plot_path),
+        },
+    }
+    with marker_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    return marker_path
+
+
 def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
@@ -614,6 +667,18 @@ def main():
         observed_batch = auxs[0][shot_positions]
         active_shot_indices = all_shot_indices[shot_positions]
         fmax_hz = max_freqs_hz[stage_index]
+
+        if args.print_progress and args.print_shot_progress:
+            stage_h = stage_index + 1
+            step_h = step_index + 1
+            n_steps_h = stage_steps[stage_index]
+            shot_preview = _format_shot_ids_for_log(active_shot_indices)
+            print(
+                f"[stage {stage_h}/{len(stage_steps)} step {step_h}/{n_steps_h}] "
+                f"active source ids={shot_preview}",
+                flush=True,
+            )
+
         return lambda model: batched_loss_grad(
             model,
             observed_batch,
@@ -722,8 +787,12 @@ def main():
             true_model=x_exact,
         )
 
-    y_hat = simulate_survey(x_hat, params["acquisition"], config)
-    metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
+    model_residual = x_hat - x_exact
+    model_denom = jax.numpy.linalg.norm(x_exact) + 1.0e-8
+    metrics = {
+        "model_rmse": float(jax.numpy.sqrt(jax.numpy.mean(model_residual**2))),
+        "model_relative_l2": float(jax.numpy.linalg.norm(model_residual) / model_denom),
+    }
     metrics["backend"] = "jax"
     metrics["final_loss"] = final_loss
     metrics["optimizer"] = args.optimizer
@@ -756,6 +825,10 @@ def main():
     )
     metrics["rmse_improvement"] = metrics["initial_model_rmse"] - metrics["model_rmse"]
     metrics["update_l2_norm"] = float(jax.numpy.linalg.norm(x_hat - x0))
+    # Data-domain metrics are filled after the optional full-survey pass below.
+    metrics["data_rmse"] = None
+    metrics["data_mae"] = None
+    metrics["data_metrics_status"] = "pending_full_survey"
     reconstruction_path = args.output_dir / f"{args.optimizer}_reconstruction.png"
     history_plot_path = args.output_dir / f"{args.optimizer}_history.png"
     metrics_path = args.output_dir / f"{args.optimizer}_metrics.json"
@@ -800,11 +873,30 @@ def main():
     figure.tight_layout()
     figure.savefig(reconstruction_path, dpi=150)
     _plot_history(history, history_plot_path)
-
-    with metrics_path.open("w", encoding="utf-8") as fh:
-        json.dump(metrics, fh, indent=2)
+    # Persist non-expensive artifacts first so a late memory spike in the final
+    # survey pass cannot prevent reconstruction/history outputs from being
+    # updated for the current run.
     with history_path.open("w", encoding="utf-8") as fh:
         json.dump(history, fh, indent=2)
+    with metrics_path.open("w", encoding="utf-8") as fh:
+        json.dump(metrics, fh, indent=2)
+
+    print(f"Saved reconstruction plot to: {reconstruction_path}")
+    print(f"Saved optimisation history plot to: {history_plot_path}")
+    print(f"Saved optimisation history to: {history_path}")
+    print(
+        "Computing final data metrics on full survey (this is the most "
+        "memory-intensive post-processing step)...",
+        flush=True,
+    )
+
+    y_hat = simulate_survey(x_hat, params["acquisition"], config)
+    full_metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
+    metrics["data_rmse"] = full_metrics["data_rmse"]
+    metrics["data_mae"] = full_metrics["data_mae"]
+    metrics["data_metrics_status"] = "complete"
+    with metrics_path.open("w", encoding="utf-8") as fh:
+        json.dump(metrics, fh, indent=2)
 
     print(json.dumps(metrics, indent=2))
     print(
@@ -829,10 +921,18 @@ def main():
         f"{config.solver.norm_grad}, "
         f"{config.solver.grad_smooth_radius}"
     )
-    print(f"Saved reconstruction plot to: {reconstruction_path}")
-    print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved metrics to: {metrics_path}")
-    print(f"Saved optimisation history to: {history_path}")
+    run_complete_marker = _write_run_complete_marker(
+        args.output_dir,
+        args.optimizer,
+        steps=args.steps,
+        max_freqs_hz=max_freqs_hz,
+        metrics_path=metrics_path,
+        history_path=history_path,
+        reconstruction_path=reconstruction_path,
+        history_plot_path=history_plot_path,
+    )
+    print(f"Saved completion marker to: {run_complete_marker}")
 
     if args.show_plots:
         plt.show()

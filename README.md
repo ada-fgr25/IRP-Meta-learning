@@ -148,6 +148,7 @@ Useful options include:
 * `--max-freqs-hz` to set the Stride-like `f_max` continuation schedule
 * `--shots-per-iter` and `--seed` to control the random shot subsets
 * `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
+* `--print-shot-progress` to print active source IDs for each step (useful for long runs)
 * `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update
 * `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments
 * `--interpolation-type {linear,hicks}` to select source/receiver interpolation
@@ -159,6 +160,11 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * reconstruction plots
 * scalar metrics in JSON
 * optimisation history in JSON
+* a `<optimizer>_RUN_COMPLETE.json` marker written at successful end-of-run
+
+The script now writes reconstruction/history artifacts before the expensive
+final full-survey metric pass, so late memory failures no longer leave those
+plots stale from a previous run.
 
 The core implementation lives directly under `src/fwi/` so imports stay short and explicit, for example `from fwi.problem import init_params`.
 
