@@ -90,6 +90,17 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
+    `damping_mode` selects between a legacy quadratic taper and a
+    Stride-inspired damping field built from the absorbing-layer profile.
+    `damping_type` controls the functional profile used by the Stride-inspired
+    mode (`sine` or `power`). `damping_power_degree` is used when
+    `damping_type='power'`.
+    `damping_reflection_coefficient` mirrors Stride's coefficient used to
+    derive a physically motivated damping scale from the absorbing width.
+    `damping_max_coefficient` can override that derived scale. If it is `None`,
+    the coefficient is derived from absorbing width and spacing.
+    `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
+    the maximum model velocity when deriving the damping field.
     `kernel` selects the time-stepping family used by the JAX solver. `OT4`
     mirrors Stride's default more closely by adding the standard fourth-order
     temporal correction on top of the spatial operator, while `OT2` keeps the
@@ -113,6 +124,12 @@ class SolverConfig:
 
     damping_cells: int = 40
     damping_strength: float = 0.015
+    damping_mode: str = "stride_like"
+    damping_type: str = "sine"
+    damping_power_degree: int = 2
+    damping_reflection_coefficient: float = 1.0e-3
+    damping_max_coefficient: float | None = None
+    damping_velocity_scale: bool = True
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
     diff_source: bool = False

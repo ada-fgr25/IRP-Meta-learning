@@ -8,7 +8,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from fwi.acoustics import _source_scale
+from fwi.acoustics import _build_boundary_mask, _source_scale
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
@@ -190,6 +190,22 @@ class Phase1BrainFWITests(unittest.TestCase):
         # Smoothing spreads the centre impulse to neighbouring cells.
         self.assertGreater(float(processed[4, 3]), 0.0)
         self.assertGreater(float(processed[3, 4]), 0.0)
+
+    def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
+        """Stride-like damping should attenuate edge cells more than the centre."""
+
+        config = _tiny_config()
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask = _build_boundary_mask(config, velocity)
+
+        self.assertEqual(mask.shape, velocity.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(mask))))
+        self.assertTrue(bool(jnp.all(mask >= 0.0)))
+        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+
+        centre = float(mask[config.grid.nx // 2, config.grid.ny // 2])
+        edge = float(mask[1, config.grid.ny // 2])
+        self.assertGreaterEqual(centre, edge)
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""

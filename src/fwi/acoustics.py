@@ -49,7 +49,80 @@ def _build_damping_mask(config: BrainFWIConfig) -> jnp.ndarray:
     return 1.0 - strength * taper**2
 
 
-def _build_boundary_mask(config: BrainFWIConfig) -> jnp.ndarray:
+def _build_stride_like_damping_sigma(
+    config: BrainFWIConfig,
+    velocity: jnp.ndarray,
+) -> jnp.ndarray:
+    """Build a Stride-inspired damping coefficient field (`sigma`).
+
+    Stride's boundary helper creates a per-dimension damping profile in the
+    absorbing frame and sums it across dimensions. We replicate the same
+    high-level shape control (`sine`/`power`) and reflection-coefficient-based
+    scaling, then convert `sigma` into a multiplicative mask for our explicit
+    time stepping.
+    """
+
+    nx = int(config.grid.nx)
+    ny = int(config.grid.ny)
+    dx = jnp.asarray(config.grid.dx, dtype=velocity.dtype)
+    dy = jnp.asarray(config.grid.dy, dtype=velocity.dtype)
+    cells = max(int(config.solver.damping_cells), 0)
+    if cells == 0:
+        return jnp.zeros((nx, ny), dtype=velocity.dtype)
+
+    damping_type = config.solver.damping_type
+    power_degree = max(int(config.solver.damping_power_degree), 1)
+    reflection = jnp.asarray(
+        max(float(config.solver.damping_reflection_coefficient), 1.0e-12),
+        dtype=velocity.dtype,
+    )
+
+    def dimension_coefficient(cell_width: int, spacing: jnp.ndarray) -> jnp.ndarray:
+        custom_coeff = config.solver.damping_max_coefficient
+        if custom_coeff is not None:
+            return jnp.asarray(custom_coeff, dtype=velocity.dtype)
+
+        if cell_width > 15:
+            return (
+                jnp.asarray((power_degree + 1.0) / 2.0, dtype=velocity.dtype)
+                * jnp.log(1.0 / reflection)
+                / (jnp.asarray(cell_width, dtype=velocity.dtype) * spacing)
+            )
+        return jnp.asarray(0.67, dtype=velocity.dtype) / spacing
+
+    coeff_x = dimension_coefficient(cells, dx)
+    coeff_y = dimension_coefficient(cells, dy)
+
+    # Distance in cells from each edge.
+    ix = jnp.minimum(jnp.arange(nx), jnp.arange(nx)[::-1]).astype(velocity.dtype)
+    iy = jnp.minimum(jnp.arange(ny), jnp.arange(ny)[::-1]).astype(velocity.dtype)
+
+    # Convert to Stride-style profile coordinate:
+    # - 1 at the outer edge
+    # - 0 at the inner edge of the absorbing frame
+    denom = max(cells - 1, 1)
+    px = jnp.clip((cells - 1 - ix) / denom, 0.0, 1.0)
+    py = jnp.clip((cells - 1 - iy) / denom, 0.0, 1.0)
+
+    if damping_type == "sine":
+        px = px - jnp.sin(2.0 * jnp.pi * px) / (2.0 * jnp.pi)
+        py = py - jnp.sin(2.0 * jnp.pi * py) / (2.0 * jnp.pi)
+    elif damping_type == "power":
+        px = px**power_degree
+        py = py**power_degree
+    else:
+        raise ValueError(
+            f"Unsupported damping_type '{damping_type}'. Use 'sine' or 'power'."
+        )
+
+    sigma = coeff_x * px[:, None] + coeff_y * py[None, :]
+    if config.solver.damping_velocity_scale:
+        sigma = sigma * jnp.max(velocity)
+
+    return sigma.astype(velocity.dtype)
+
+
+def _build_boundary_mask(config: BrainFWIConfig, velocity: jnp.ndarray) -> jnp.ndarray:
     """Combine damping and fixed-edge clamping into one linear mask.
 
     Writing the boundary treatment this way keeps the forward and adjoint
@@ -57,7 +130,18 @@ def _build_boundary_mask(config: BrainFWIConfig) -> jnp.ndarray:
     mask rather than having to mirror a sequence of in-place edge updates.
     """
 
-    damping = _build_damping_mask(config)
+    if config.solver.damping_mode == "legacy":
+        damping = _build_damping_mask(config)
+    elif config.solver.damping_mode == "stride_like":
+        sigma = _build_stride_like_damping_sigma(config, velocity)
+        # Convert damping coefficients to a multiplicative attenuation mask.
+        damping = jnp.exp(-sigma * config.time.dt)
+    else:
+        raise ValueError(
+            f"Unsupported damping_mode '{config.solver.damping_mode}'. "
+            "Use 'legacy' or 'stride_like'."
+        )
+
     interior = jnp.ones_like(damping)
     interior = interior.at[0, :].set(0.0)
     interior = interior.at[-1, :].set(0.0)
@@ -312,7 +396,7 @@ def _simulate_shot_with_checkpoints(
     source = receivers[shot_index]
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
-    boundary_mask = _build_boundary_mask(config)
+    boundary_mask = _build_boundary_mask(config, velocity)
     source_wavelet = _prepare_source_wavelet(wavelet, config)
     wavelet_segments, active_segments = _segment_wavelet(
         source_wavelet,
@@ -449,7 +533,7 @@ def loss_and_grad(
     )
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
-    boundary_mask = _build_boundary_mask(config)
+    boundary_mask = _build_boundary_mask(config, velocity)
     grid_shape = velocity.shape
 
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
