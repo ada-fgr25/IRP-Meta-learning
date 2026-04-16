@@ -147,6 +147,7 @@ Useful options include:
 * `--optimizer {sgd,adam,lbfgsb}`
 * `--max-freqs-hz` to set the Stride-like `f_max` continuation schedule
 * `--shots-per-iter` and `--seed` to control the random shot subsets
+* `--final-shots N` to evaluate final data-domain metrics on a deterministic shot subset instead of all shots
 * `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
 * `--print-shot-progress` to print active source IDs for each step (useful for long runs)
 * `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update

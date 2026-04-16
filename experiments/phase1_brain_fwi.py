@@ -151,6 +151,15 @@ def parse_args():
         help="Comma-separated stage cutoffs for Stride-style frequency continuation.",
     )
     parser.add_argument("--shots-per-iter", type=int, default=32)
+    parser.add_argument(
+        "--final-shots",
+        type=int,
+        default=None,
+        help=(
+            "Optional number of shots to use for final data-domain metrics. "
+            "If omitted, metrics use all shots."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
         "--output-dir",
@@ -266,6 +275,24 @@ def _build_random_shot_schedule(
         schedule.append(tuple(stage_schedule))
 
     return tuple(schedule)
+
+
+def _select_final_metric_shot_positions(
+    all_shot_indices: jnp.ndarray,
+    final_shots: int | None,
+    seed: int,
+) -> jnp.ndarray:
+    """Select deterministic shot positions used for final metric evaluation."""
+
+    total = int(all_shot_indices.shape[0])
+    if final_shots is None or final_shots <= 0 or final_shots >= total:
+        return jnp.arange(total, dtype=jnp.int32)
+
+    rng = np.random.default_rng(seed + 7_919)
+    chosen = np.sort(
+        rng.choice(np.arange(total, dtype=np.int32), size=final_shots, replace=False)
+    )
+    return jnp.asarray(chosen, dtype=jnp.int32)
 
 
 def _shared_limits(images):
@@ -804,6 +831,7 @@ def main():
     metrics["max_freqs_hz"] = list(max_freqs_hz)
     metrics["stage_steps"] = list(stage_steps)
     metrics["shots_per_iter"] = args.shots_per_iter
+    metrics["final_shots"] = args.final_shots
     metrics["seed"] = args.seed
     metrics["checkpoint_interval"] = config.solver.checkpoint_interval
     metrics["damping_mode"] = config.solver.damping_mode
@@ -884,14 +912,30 @@ def main():
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved optimisation history to: {history_path}")
+    final_metric_positions = _select_final_metric_shot_positions(
+        all_shot_indices,
+        args.final_shots,
+        args.seed,
+    )
+    final_metric_shot_indices = all_shot_indices[final_metric_positions]
+    observed_for_metrics = auxs[0][final_metric_positions]
+    metrics["final_metric_shots_used"] = int(final_metric_positions.shape[0])
+    metrics["final_metric_total_shots"] = int(all_shot_indices.shape[0])
     print(
-        "Computing final data metrics on full survey (this is the most "
-        "memory-intensive post-processing step)...",
+        "Computing final data metrics on "
+        f"{metrics['final_metric_shots_used']}/"
+        f"{metrics['final_metric_total_shots']} shots "
+        "(memory-intensive post-processing step)...",
         flush=True,
     )
 
-    y_hat = simulate_survey(x_hat, params["acquisition"], config)
-    full_metrics = compute_metrics(x_hat, x_exact, y_hat, auxs[0])
+    y_hat = simulate_survey(
+        x_hat,
+        params["acquisition"],
+        config,
+        shot_indices=final_metric_shot_indices,
+    )
+    full_metrics = compute_metrics(x_hat, x_exact, y_hat, observed_for_metrics)
     metrics["data_rmse"] = full_metrics["data_rmse"]
     metrics["data_mae"] = full_metrics["data_mae"]
     metrics["data_metrics_status"] = "complete"

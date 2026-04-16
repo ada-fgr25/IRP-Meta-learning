@@ -30,6 +30,7 @@ from fwi.problem import (
 )
 from experiments.phase1_brain_fwi import (
     _format_shot_ids_for_log,
+    _select_final_metric_shot_positions,
     _write_run_complete_marker,
 )
 
@@ -313,6 +314,24 @@ class Phase1BrainFWITests(unittest.TestCase):
             self.assertIn('"status": "completed"', payload)
             self.assertIn('"optimizer": "sgd"', payload)
             self.assertIn('"steps": 24', payload)
+
+    def test_final_metric_shot_selection_is_deterministic_and_bounded(self):
+        """Final-metric shot subset selection should be stable and valid."""
+
+        all_shots = jnp.arange(12, dtype=jnp.int32)
+        subset_a = _select_final_metric_shot_positions(
+            all_shots, final_shots=5, seed=42
+        )
+        subset_b = _select_final_metric_shot_positions(
+            all_shots, final_shots=5, seed=42
+        )
+        self.assertTrue(bool(jnp.array_equal(subset_a, subset_b)))
+        self.assertEqual(subset_a.shape[0], 5)
+        self.assertTrue(bool(jnp.all(subset_a >= 0)))
+        self.assertTrue(bool(jnp.all(subset_a < 12)))
+
+        full = _select_final_metric_shot_positions(all_shots, final_shots=None, seed=42)
+        self.assertTrue(bool(jnp.array_equal(full, jnp.arange(12, dtype=jnp.int32))))
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""
