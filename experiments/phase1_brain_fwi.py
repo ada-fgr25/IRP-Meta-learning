@@ -529,18 +529,41 @@ def main():
             flush=True,
         )
 
+    # Compile once and pass per-step data as dynamic inputs. This avoids creating
+    # many distinct jitted closures that capture large constants and can trigger
+    # high memory pressure on benchmark-scale runs.
+    batched_loss_grad = jax.jit(
+        lambda model, observed_batch, active_shot_indices, fmax_hz: dldx(
+            params,
+            model,
+            (observed_batch, fmax_hz, active_shot_indices),
+        ),
+        static_argnames=("fmax_hz",),
+    )
+    full_loss_grad = jax.jit(
+        lambda model, fmax_hz: dldx(
+            params,
+            model,
+            (auxs[0], fmax_hz),
+        ),
+        static_argnames=("fmax_hz",),
+    )
+
     def make_loss_grad_fn(stage_index: int):
-        stage_auxs = (auxs[0], max_freqs_hz[stage_index])
-        return jax.jit(lambda model: dldx(params, model, stage_auxs))
+        fmax_hz = max_freqs_hz[stage_index]
+        return lambda model: full_loss_grad(model, fmax_hz=fmax_hz)
 
     def make_step_loss_grad_fn(stage_index: int, step_index: int):
         shot_positions = shot_schedule[stage_index][step_index]
-        stage_auxs = (
-            auxs[0][shot_positions],
-            max_freqs_hz[stage_index],
-            all_shot_indices[shot_positions],
+        observed_batch = auxs[0][shot_positions]
+        active_shot_indices = all_shot_indices[shot_positions]
+        fmax_hz = max_freqs_hz[stage_index]
+        return lambda model: batched_loss_grad(
+            model,
+            observed_batch,
+            active_shot_indices,
+            fmax_hz=fmax_hz,
         )
-        return jax.jit(lambda model: dldx(params, model, stage_auxs))
 
     def step_callback(event: dict[str, object]) -> None:
         """Save diagnostics at selected points for each continuation block."""
