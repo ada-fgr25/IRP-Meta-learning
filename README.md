@@ -149,6 +149,7 @@ Useful options include:
 * `--shots-per-iter` and `--seed` to control the random shot subsets
 * `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
 * `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update
+* `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
 * `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
@@ -165,8 +166,8 @@ Parity note:
 * The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
 * The JAX solver now also mirrors several discrete `IsoAcousticDevito` choices more directly: `OT4` time stepping by default, Stride-style source scaling `2 * dt**2 * vp / max(dx, dy)` with optional `diff_source`, and an explicit adjoint built from the exact linearisation of that discrete update.
 * The optimisation loop now includes a Stride-like approximation of `ProcessGlobalGradient` (`mask_field -> smooth_field -> norm_field`) before each SGD/Adam update and still applies model clipping after each step to stay within physical velocity bounds.
-* Boundary damping now also follows a Stride-inspired profile by default (`sine`/`power` absorbing-field profile with reflection-coefficient scaling, converted to a stable time-step attenuation mask), but this is still not a full PML/sponge operator-level reimplementation.
-* The JAX path remains an approximation rather than a full Stride reimplementation. Remaining gaps include point-grid injection instead of Hicks interpolation, second-order spatial finite differences rather than Devito's higher space order, no density/attenuation terms, and trace-domain FFT masking to approximate Stride's `f_max` continuation.
+* Boundary damping now supports three JAX-side modes: `legacy` taper mask, `stride_like` absorbing-profile mask, and a Stride-inspired `sponge2` damped second-order update. This improves boundary parity but is still not a full Devito boundary operator implementation.
+* The JAX path remains an approximation rather than a full Stride reimplementation. Remaining gaps include point-grid injection instead of Hicks interpolation, second-order spatial finite differences rather than Devito's higher space order, no density/attenuation terms, no full complex-frequency-shift PML2 auxiliary-field system, and trace-domain FFT masking to approximate Stride's `f_max` continuation.
 * Full-grid runs are still demanding. The solver now reduces memory by accumulating shots sequentially and replaying the adjoint in checkpointed time segments, but large benchmark-scale runs may still need smaller shot subsets, smaller checkpoint intervals, or more capable hardware.
 
 ## ▶️ Running The Stride Benchmark
