@@ -28,10 +28,10 @@ from fwi.problem import (
     loss,
     smooth_traces,
 )
-from experiments.phase1_brain_fwi import (
-    _format_shot_ids_for_log,
-    _select_final_metric_shot_positions,
-    _write_run_complete_marker,
+from fwi.run_utils import (
+    format_shot_ids_for_log,
+    select_final_metric_shot_positions,
+    write_run_complete_marker,
 )
 
 
@@ -283,10 +283,10 @@ class Phase1BrainFWITests(unittest.TestCase):
     def test_shot_progress_formatter_compacts_long_batches(self):
         """Shot progress logging should keep long source lists readable."""
 
-        compact = _format_shot_ids_for_log(jnp.array([1, 2, 3], dtype=jnp.int32))
+        compact = format_shot_ids_for_log(jnp.array([1, 2, 3], dtype=jnp.int32))
         self.assertEqual(compact, "[1, 2, 3]")
 
-        long_preview = _format_shot_ids_for_log(
+        long_preview = format_shot_ids_for_log(
             jnp.arange(16, dtype=jnp.int32),
             max_items=6,
         )
@@ -298,7 +298,7 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            marker = _write_run_complete_marker(
+            marker = write_run_complete_marker(
                 output_dir,
                 "sgd",
                 steps=24,
@@ -319,18 +319,14 @@ class Phase1BrainFWITests(unittest.TestCase):
         """Final-metric shot subset selection should be stable and valid."""
 
         all_shots = jnp.arange(12, dtype=jnp.int32)
-        subset_a = _select_final_metric_shot_positions(
-            all_shots, final_shots=5, seed=42
-        )
-        subset_b = _select_final_metric_shot_positions(
-            all_shots, final_shots=5, seed=42
-        )
+        subset_a = select_final_metric_shot_positions(all_shots, final_shots=5, seed=42)
+        subset_b = select_final_metric_shot_positions(all_shots, final_shots=5, seed=42)
         self.assertTrue(bool(jnp.array_equal(subset_a, subset_b)))
         self.assertEqual(subset_a.shape[0], 5)
         self.assertTrue(bool(jnp.all(subset_a >= 0)))
         self.assertTrue(bool(jnp.all(subset_a < 12)))
 
-        full = _select_final_metric_shot_positions(all_shots, final_shots=None, seed=42)
+        full = select_final_metric_shot_positions(all_shots, final_shots=None, seed=42)
         self.assertTrue(bool(jnp.array_equal(full, jnp.arange(12, dtype=jnp.int32))))
 
     def test_trace_smoothing_preserves_shape(self):
