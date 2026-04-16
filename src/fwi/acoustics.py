@@ -122,32 +122,51 @@ def _build_stride_like_damping_sigma(
     return sigma.astype(velocity.dtype)
 
 
-def _build_boundary_mask(config: BrainFWIConfig, velocity: jnp.ndarray) -> jnp.ndarray:
-    """Combine damping and fixed-edge clamping into one linear mask.
+def _build_interior_clamp_mask(config: BrainFWIConfig, shape, dtype) -> jnp.ndarray:
+    """Build a fixed-edge clamp mask shared by all boundary modes."""
 
-    Writing the boundary treatment this way keeps the forward and adjoint
-    implementations aligned: both simply apply the same self-adjoint diagonal
-    mask rather than having to mirror a sequence of in-place edge updates.
-    """
-
-    if config.solver.damping_mode == "legacy":
-        damping = _build_damping_mask(config)
-    elif config.solver.damping_mode == "stride_like":
-        sigma = _build_stride_like_damping_sigma(config, velocity)
-        # Convert damping coefficients to a multiplicative attenuation mask.
-        damping = jnp.exp(-sigma * config.time.dt)
-    else:
-        raise ValueError(
-            f"Unsupported damping_mode '{config.solver.damping_mode}'. "
-            "Use 'legacy' or 'stride_like'."
-        )
-
-    interior = jnp.ones_like(damping)
+    interior = jnp.ones(shape, dtype=dtype)
     interior = interior.at[0, :].set(0.0)
     interior = interior.at[-1, :].set(0.0)
     interior = interior.at[:, 0].set(0.0)
     interior = interior.at[:, -1].set(0.0)
-    return damping * interior
+    return interior
+
+
+def _build_boundary_terms(
+    config: BrainFWIConfig,
+    velocity: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return `(boundary_mask, sponge_damp)` for the selected boundary mode.
+
+    The current JAX solver supports:
+    - `legacy`: simple quadratic taper mask
+    - `stride_like`: Stride-inspired absorbing profile converted to mask
+    - `sponge2`: Stride-like second-order sponge damping coefficient
+    """
+
+    interior = _build_interior_clamp_mask(config, velocity.shape, velocity.dtype)
+
+    if config.solver.damping_mode == "legacy":
+        damping = _build_damping_mask(config).astype(velocity.dtype)
+        return damping * interior, jnp.zeros_like(velocity)
+
+    if config.solver.damping_mode == "stride_like":
+        sigma = _build_stride_like_damping_sigma(config, velocity)
+        damping = jnp.exp(-sigma * config.time.dt)
+        return damping * interior, jnp.zeros_like(velocity)
+
+    if config.solver.damping_mode == "sponge2":
+        sigma = _build_stride_like_damping_sigma(config, velocity)
+        # Stride's SpongeBoundary2 scales damping by 7*dt before injecting it in
+        # the second-order damped update equation.
+        sponge_damp = jnp.asarray(7.0, dtype=velocity.dtype) * sigma * config.time.dt
+        return interior, sponge_damp
+
+    raise ValueError(
+        f"Unsupported damping_mode '{config.solver.damping_mode}'. "
+        "Use 'legacy', 'stride_like', or 'sponge2'."
+    )
 
 
 def _inject_source(
@@ -263,6 +282,7 @@ def _propose_next_field(
     source_index: jnp.ndarray,
     source_sample: jnp.ndarray,
     boundary_mask: jnp.ndarray,
+    sponge_damp: jnp.ndarray,
     config: BrainFWIConfig,
 ) -> jnp.ndarray:
     """Apply one discrete wave-equation step before receiver sampling.
@@ -274,17 +294,31 @@ def _propose_next_field(
     """
 
     velocity_sq = velocity**2
-    pressure_update = (
-        2.0 * u_curr
-        - u_prev
-        + (config.time.dt**2) * _spatial_operator(u_curr, velocity_sq, config)
+    pressure_update = (config.time.dt**2) * _spatial_operator(
+        u_curr, velocity_sq, config
     )
     scaled_source_sample = source_sample * _source_scale(
         velocity[source_index[0], source_index[1]],
         config,
     )
     source_update = _inject_source(source_index, scaled_source_sample, velocity.shape)
-    return boundary_mask * (pressure_update + source_update)
+
+    if config.solver.damping_mode == "sponge2":
+        # Discrete analogue of Stride's second-order sponge damping term:
+        #   u_tt - L + 2*damp*u_t + damp^2*u = source
+        # with centred u_t approximation. Solving explicitly for u_{n+1} gives:
+        #   u_{n+1} = [2u_n - (1-d)u_{n-1} + dt^2*L(u_n) + src - d^2*u_n] / (1+d)
+        # where `d` is the pre-scaled damping coefficient field.
+        numerator = (
+            2.0 * u_curr
+            - (1.0 - sponge_damp) * u_prev
+            + pressure_update
+            + source_update
+            - (sponge_damp**2) * u_curr
+        )
+        return boundary_mask * (numerator / (1.0 + sponge_damp))
+
+    return boundary_mask * (2.0 * u_curr - u_prev + pressure_update + source_update)
 
 
 def _advance_state(
@@ -295,6 +329,7 @@ def _advance_state(
     source_sample: jnp.ndarray,
     active: jnp.ndarray,
     boundary_mask: jnp.ndarray,
+    sponge_damp: jnp.ndarray,
     config: BrainFWIConfig,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Advance the solver state by one step or keep it unchanged if inactive."""
@@ -306,6 +341,7 @@ def _advance_state(
         source_index,
         source_sample,
         boundary_mask,
+        sponge_damp,
         config,
     )
     u_next = jnp.where(active, proposed_u_next, u_curr)
@@ -322,6 +358,7 @@ def _step_shot_state(
     receiver_j: jnp.ndarray,
     velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
+    sponge_damp: jnp.ndarray,
     config: BrainFWIConfig,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -343,6 +380,7 @@ def _step_shot_state(
         source_value,
         active,
         boundary_mask,
+        sponge_damp,
         config,
     )
     traces = jnp.where(active, u_next[receiver_i, receiver_j], 0.0)
@@ -396,7 +434,7 @@ def _simulate_shot_with_checkpoints(
     source = receivers[shot_index]
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
-    boundary_mask = _build_boundary_mask(config, velocity)
+    boundary_mask, sponge_damp = _build_boundary_terms(config, velocity)
     source_wavelet = _prepare_source_wavelet(wavelet, config)
     wavelet_segments, active_segments = _segment_wavelet(
         source_wavelet,
@@ -418,6 +456,7 @@ def _simulate_shot_with_checkpoints(
                 receiver_j,
                 velocity,
                 boundary_mask,
+                sponge_damp,
                 config,
             ),
             carry,
@@ -442,6 +481,7 @@ def _replay_segment_history(
     receiver_j: jnp.ndarray,
     velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
+    sponge_damp: jnp.ndarray,
     config: BrainFWIConfig,
     source_block: jnp.ndarray,
     active_block: jnp.ndarray,
@@ -463,6 +503,7 @@ def _replay_segment_history(
             receiver_j,
             velocity,
             boundary_mask,
+            sponge_damp,
             config,
         ),
         start_carry,
@@ -533,7 +574,7 @@ def loss_and_grad(
     )
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
-    boundary_mask = _build_boundary_mask(config, velocity)
+    boundary_mask, sponge_damp = _build_boundary_terms(config, velocity)
     grid_shape = velocity.shape
 
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
@@ -609,6 +650,7 @@ def loss_and_grad(
                             source,
                             source_block_value,
                             boundary_mask,
+                            sponge_damp,
                             config,
                         ),
                     )
@@ -651,6 +693,7 @@ def loss_and_grad(
                 receiver_j,
                 velocity,
                 boundary_mask,
+                sponge_damp,
                 config,
                 source_block,
                 active_block,

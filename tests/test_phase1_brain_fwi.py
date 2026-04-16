@@ -8,7 +8,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from fwi.acoustics import _build_boundary_mask, _source_scale
+from fwi.acoustics import _build_boundary_terms, _source_scale
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
@@ -196,16 +196,40 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         config = _tiny_config()
         velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
-        mask = _build_boundary_mask(config, velocity)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
 
         self.assertEqual(mask.shape, velocity.shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(mask))))
         self.assertTrue(bool(jnp.all(mask >= 0.0)))
         self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        self.assertTrue(bool(jnp.allclose(sponge_damp, 0.0)))
 
         centre = float(mask[config.grid.nx // 2, config.grid.ny // 2])
         edge = float(mask[1, config.grid.ny // 2])
         self.assertGreaterEqual(centre, edge)
+
+    def test_sponge2_boundary_mode_exposes_positive_damping_field(self):
+        """Sponge2 mode should return a non-zero damping field near boundaries."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=4),
+        )
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
+
+        self.assertTrue(bool(jnp.all(mask >= 0.0)))
+        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        self.assertGreater(float(jnp.max(sponge_damp)), 0.0)
+        self.assertTrue(
+            bool(
+                jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
+            )
+        )
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""

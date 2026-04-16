@@ -90,8 +90,10 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
-    `damping_mode` selects between a legacy quadratic taper and a
-    Stride-inspired damping field built from the absorbing-layer profile.
+    `damping_mode` selects between:
+    - `legacy`: simple quadratic taper mask
+    - `stride_like`: Stride-inspired damping field mapped to a multiplicative mask
+    - `sponge2`: Stride-inspired second-order sponge damping update
     `damping_type` controls the functional profile used by the Stride-inspired
     mode (`sine` or `power`). `damping_power_degree` is used when
     `damping_type='power'`.
