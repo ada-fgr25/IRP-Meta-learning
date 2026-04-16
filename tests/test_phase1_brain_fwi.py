@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+import tempfile
 import unittest
 
 import jax
 import jax.numpy as jnp
 
+from fwi.acoustics import _build_boundary_terms, _source_scale
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
@@ -15,12 +19,19 @@ from fwi.config import (
     ModelConfig,
     TimeConfig,
 )
+from fwi.optimisers import process_global_gradient_stride_like
 from fwi.problem import (
     build_brain_fwi_problem,
     dldx,
     forward,
     init_params,
+    loss,
     smooth_traces,
+)
+from fwi.run_utils import (
+    format_shot_ids_for_log,
+    select_final_metric_shot_positions,
+    write_run_complete_marker,
 )
 
 
@@ -48,6 +59,28 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(params["acquisition"].n_shots, 3)
         self.assertEqual(params["acquisition"].n_receivers, 12)
 
+    def test_hicks_acquisition_builds_precomputed_coefficients(self):
+        """Hicks mode should materialise Stride-like interpolation tensors."""
+
+        base = _tiny_config()
+        hicks_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(base.acquisition, interpolation_type="hicks"),
+            model=base.model,
+            solver=base.solver,
+        )
+        params = init_params(jax.random.PRNGKey(0), config=hicks_config)
+        acquisition = params["acquisition"]
+
+        self.assertEqual(acquisition.interpolation_type, "hicks")
+        self.assertIsNotNone(acquisition.source_reference_gridpoints)
+        self.assertIsNotNone(acquisition.source_coefficients)
+        self.assertIsNotNone(acquisition.receiver_reference_gridpoints)
+        self.assertIsNotNone(acquisition.receiver_coefficients)
+        self.assertEqual(acquisition.source_coefficients.shape, (12, 2, 8))
+        self.assertEqual(acquisition.receiver_coefficients.shape, (12, 2, 8))
+
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
 
@@ -56,6 +89,26 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         self.assertEqual(loss_value.shape, (1,))
         self.assertEqual(grad.shape, params["x0"].shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+
+    def test_hicks_forward_and_gradient_are_finite(self):
+        """The explicit forward/adjoint path should remain stable in Hicks mode."""
+
+        base = _tiny_config()
+        hicks_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(base.acquisition, interpolation_type="hicks"),
+            model=base.model,
+            solver=base.solver,
+        )
+        params = init_params(jax.random.PRNGKey(0), config=hicks_config)
+        traces = forward(params, params["x_exact"])
+        loss_value, grad = dldx(params, params["x0"], (params["y_obs"],))
+
+        self.assertEqual(traces.shape, (3, 40, 12))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces))))
+        self.assertEqual(loss_value.shape, (1,))
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
 
     def test_explicit_adjoint_matches_autodiff_gradient(self):
@@ -67,8 +120,7 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         explicit_value, explicit_grad = backend.loss_grad(params, params["x0"], auxs)
         autodiff_value, autodiff_grad = jax.value_and_grad(
-            lambda model: jnp.sum((forward(params, model) - auxs[0]) ** 2)
-            / auxs[0].size
+            lambda model: loss(params, model, auxs).sum()
         )(params["x0"])
 
         self.assertTrue(
@@ -98,6 +150,184 @@ class Phase1BrainFWITests(unittest.TestCase):
         meta_grad = jax.grad(squared_grad_norm)(params["x0"])
         self.assertEqual(meta_grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(meta_grad))))
+
+    def test_stride_source_scale_matches_reference_formula(self):
+        """The source scaling should follow the tracked Stride expression."""
+
+        config = _tiny_config()
+        velocity_at_source = jnp.array(1500.0)
+        expected = (
+            2.0
+            * (config.time.dt**2)
+            * velocity_at_source
+            / max(config.grid.dx, config.grid.dy)
+            / config.time.dt
+        )
+
+        self.assertTrue(
+            bool(jnp.isclose(_source_scale(velocity_at_source, config), expected))
+        )
+
+    def test_ot2_and_ot4_produce_distinct_finite_wavefields(self):
+        """The kernel switch should be active and remain numerically stable."""
+
+        base = _tiny_config()
+        ot2_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, kernel="OT2"),
+        )
+        ot4_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, kernel="OT4"),
+        )
+
+        ot2_params = init_params(jax.random.PRNGKey(0), config=ot2_config)
+        ot4_params = init_params(jax.random.PRNGKey(0), config=ot4_config)
+        traces_ot2 = forward(ot2_params, ot2_params["x_exact"])
+        traces_ot4 = forward(ot4_params, ot4_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot2))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot4))))
+        self.assertFalse(bool(jnp.allclose(traces_ot2, traces_ot4)))
+
+    def test_stride_like_gradient_processing_masks_normalises_and_smooths(self):
+        """Gradient preprocessing should follow the configured stride-like steps."""
+
+        grad = jnp.zeros((8, 8), dtype=jnp.float32)
+        grad = grad.at[4, 4].set(5.0)
+        grad = grad.at[1, 1].set(2.0)
+
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=1,
+            mask_grad=True,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=True,
+        )
+
+        # A boundary-only impulse should be removed by masking.
+        boundary_grad = jnp.zeros((8, 8), dtype=jnp.float32).at[0, 0].set(3.0)
+        masked_boundary = process_global_gradient_stride_like(
+            boundary_grad,
+            damping_cells=1,
+            mask_grad=True,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        unmasked_boundary = process_global_gradient_stride_like(
+            boundary_grad,
+            damping_cells=1,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        self.assertTrue(bool(jnp.allclose(masked_boundary, 0.0)))
+        self.assertGreater(float(jnp.linalg.norm(unmasked_boundary)), 0.0)
+
+        # Normalisation keeps amplitudes in [-1, 1].
+        self.assertLessEqual(float(jnp.max(jnp.abs(processed))), 1.0 + 1.0e-6)
+
+        # Smoothing spreads the centre impulse to neighbouring cells.
+        self.assertGreater(float(processed[4, 3]), 0.0)
+        self.assertGreater(float(processed[3, 4]), 0.0)
+
+    def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
+        """Stride-like damping should attenuate edge cells more than the centre."""
+
+        config = _tiny_config()
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
+
+        self.assertEqual(mask.shape, velocity.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(mask))))
+        self.assertTrue(bool(jnp.all(mask >= 0.0)))
+        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        self.assertTrue(bool(jnp.allclose(sponge_damp, 0.0)))
+
+        centre = float(mask[config.grid.nx // 2, config.grid.ny // 2])
+        edge = float(mask[1, config.grid.ny // 2])
+        self.assertGreaterEqual(centre, edge)
+
+    def test_sponge2_boundary_mode_exposes_positive_damping_field(self):
+        """Sponge2 mode should return a non-zero damping field near boundaries."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=4),
+        )
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
+
+        self.assertTrue(bool(jnp.all(mask >= 0.0)))
+        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        self.assertGreater(float(jnp.max(sponge_damp)), 0.0)
+        self.assertTrue(
+            bool(
+                jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
+            )
+        )
+
+    def test_shot_progress_formatter_compacts_long_batches(self):
+        """Shot progress logging should keep long source lists readable."""
+
+        compact = format_shot_ids_for_log(jnp.array([1, 2, 3], dtype=jnp.int32))
+        self.assertEqual(compact, "[1, 2, 3]")
+
+        long_preview = format_shot_ids_for_log(
+            jnp.arange(16, dtype=jnp.int32),
+            max_items=6,
+        )
+        self.assertIn("(total=16)", long_preview)
+        self.assertIn("...", long_preview)
+
+    def test_run_complete_marker_writes_expected_artifact(self):
+        """Completion marker should be created with artifact references."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            marker = write_run_complete_marker(
+                output_dir,
+                "sgd",
+                steps=24,
+                max_freqs_hz=(100000.0, 200000.0, 300000.0),
+                metrics_path=output_dir / "sgd_metrics.json",
+                history_path=output_dir / "sgd_history.json",
+                reconstruction_path=output_dir / "sgd_reconstruction.png",
+                history_plot_path=output_dir / "sgd_history.png",
+            )
+
+            self.assertTrue(marker.exists())
+            payload = marker.read_text(encoding="utf-8")
+            self.assertIn('"status": "completed"', payload)
+            self.assertIn('"optimizer": "sgd"', payload)
+            self.assertIn('"steps": 24', payload)
+
+    def test_final_metric_shot_selection_is_deterministic_and_bounded(self):
+        """Final-metric shot subset selection should be stable and valid."""
+
+        all_shots = jnp.arange(12, dtype=jnp.int32)
+        subset_a = select_final_metric_shot_positions(all_shots, final_shots=5, seed=42)
+        subset_b = select_final_metric_shot_positions(all_shots, final_shots=5, seed=42)
+        self.assertTrue(bool(jnp.array_equal(subset_a, subset_b)))
+        self.assertEqual(subset_a.shape[0], 5)
+        self.assertTrue(bool(jnp.all(subset_a >= 0)))
+        self.assertTrue(bool(jnp.all(subset_a < 12)))
+
+        full = select_final_metric_shot_positions(all_shots, final_shots=None, seed=42)
+        self.assertTrue(bool(jnp.array_equal(full, jnp.arange(12, dtype=jnp.int32))))
 
     def test_trace_smoothing_preserves_shape(self):
         """Continuation smoothing should not change the survey tensor shape."""

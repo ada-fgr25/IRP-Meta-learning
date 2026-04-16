@@ -48,6 +48,10 @@ class AcquisitionConfig:
     full ring as the available shot pool. Per-iteration random shot subsets are
     selected later by the optimiser loop rather than being baked into this
     static acquisition description.
+
+    `interpolation_type` mirrors Stride's receiver/source interpolation switch:
+    - `linear`: simple gridpoint interpolation baseline
+    - `hicks`: sinc/Kaiser-style precomputed interpolation coefficients
     """
 
     n_transducers: int = 256
@@ -56,7 +60,8 @@ class AcquisitionConfig:
     ellipse_scale_y: float = 0.85
     source_frequency_hz: float = 2.5e5
     source_cycles: int = 3
-    source_amplitude: float = 1.0e12
+    source_amplitude: float = 1.0
+    interpolation_type: str = "linear"
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,35 @@ class SolverConfig:
 
     The damping frame is a lightweight absorbing boundary condition used to
     suppress edge reflections without introducing a more elaborate PML.
+    `damping_mode` selects between:
+    - `legacy`: simple quadratic taper mask
+    - `stride_like`: Stride-inspired damping field mapped to a multiplicative mask
+    - `sponge2`: Stride-inspired second-order sponge damping update
+    `damping_type` controls the functional profile used by the Stride-inspired
+    mode (`sine` or `power`). `damping_power_degree` is used when
+    `damping_type='power'`.
+    `damping_reflection_coefficient` mirrors Stride's coefficient used to
+    derive a physically motivated damping scale from the absorbing width.
+    `damping_max_coefficient` can override that derived scale. If it is `None`,
+    the coefficient is derived from absorbing width and spacing.
+    `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
+    the maximum model velocity when deriving the damping field.
+    `kernel` selects the time-stepping family used by the JAX solver. `OT4`
+    mirrors Stride's default more closely by adding the standard fourth-order
+    temporal correction on top of the spatial operator, while `OT2` keeps the
+    simpler second-order update available for debugging or ablations.
+    `source_scale_mode` controls how the source sample is converted into a
+    pressure update. The default `stride` mode follows the Stride
+    `IsoAcousticDevito` scaling `2 * dt**2 * vp / max(dx, dy)` and, unless
+    `diff_source` is enabled, divides once more by `dt` exactly as the Devito
+    implementation does.
+    `diff_source` mirrors Stride's optional behaviour of injecting the first
+    time derivative of the source wavelet instead of the raw wavelet.
+    `stride_grad_processing` toggles a JAX approximation of Stride's default
+    `ProcessGlobalGradient` pipeline before each optimiser update.
+    `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
+    processing switches. `grad_smooth_radius` controls the spatial radius of
+    the smoothing kernel when `smooth_grad` is enabled.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -97,6 +131,20 @@ class SolverConfig:
 
     damping_cells: int = 40
     damping_strength: float = 0.015
+    damping_mode: str = "stride_like"
+    damping_type: str = "sine"
+    damping_power_degree: int = 2
+    damping_reflection_coefficient: float = 1.0e-3
+    damping_max_coefficient: float | None = None
+    damping_velocity_scale: bool = True
+    kernel: str = "OT4"
+    source_scale_mode: str = "stride"
+    diff_source: bool = False
+    stride_grad_processing: bool = True
+    mask_grad: bool = True
+    smooth_grad: bool = True
+    norm_grad: bool = True
+    grad_smooth_radius: int = 2
     checkpoint_interval: int = 32
 
 

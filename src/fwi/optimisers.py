@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -17,6 +18,79 @@ def _project_velocity(model: Array, bounds: tuple[float, float]) -> Array:
     """Keep velocity estimates within physically plausible limits."""
 
     return jnp.clip(model, bounds[0], bounds[1])
+
+
+def _edge_padded_rolling_mean_1d(values: Array, radius: int) -> Array:
+    """Return a 1D rolling mean with edge padding.
+
+    A compact box smoother is a practical stand-in for Stride's default
+    `smooth_field` preprocessing step. We apply it separably in 2D later.
+    """
+
+    radius = max(int(radius), 0)
+    if radius == 0:
+        return values
+
+    window = 2 * radius + 1
+    kernel = jnp.ones((window,), dtype=values.dtype) / window
+    padded = jnp.pad(values, (radius, radius), mode="edge")
+    return jnp.convolve(padded, kernel, mode="valid")
+
+
+def _box_smooth_2d(field: Array, radius: int) -> Array:
+    """Apply a separable box filter to a 2D field."""
+
+    row_smoothed = jax.vmap(lambda row: _edge_padded_rolling_mean_1d(row, radius))(
+        field
+    )
+    col_smoothed_t = jax.vmap(lambda col: _edge_padded_rolling_mean_1d(col, radius))(
+        row_smoothed.T
+    )
+    return col_smoothed_t.T
+
+
+def process_global_gradient_stride_like(
+    grad: Array,
+    *,
+    damping_cells: int,
+    mask_grad: bool = True,
+    smooth_grad: bool = True,
+    smooth_radius: int = 2,
+    norm_grad: bool = True,
+) -> Array:
+    """Approximate Stride's default `ProcessGlobalGradient` pipeline.
+
+    Stride's default stack is:
+    - `mask_field`
+    - `smooth_field`
+    - `norm_field`
+
+    We reproduce the same high-level behaviour in pure JAX:
+    - mask: zero gradient in the outer absorbing frame
+    - smooth: apply a lightweight separable box filter
+    - norm: scale by max absolute amplitude to stabilise step magnitudes
+    """
+
+    processed = grad
+
+    if mask_grad:
+        cells = max(int(damping_cells), 0)
+        if cells > 0:
+            mask = jnp.ones_like(processed)
+            mask = mask.at[:cells, :].set(0.0)
+            mask = mask.at[-cells:, :].set(0.0)
+            mask = mask.at[:, :cells].set(0.0)
+            mask = mask.at[:, -cells:].set(0.0)
+            processed = processed * mask
+
+    if smooth_grad:
+        processed = _box_smooth_2d(processed, radius=smooth_radius)
+
+    if norm_grad:
+        max_abs = jnp.max(jnp.abs(processed))
+        processed = processed / jnp.maximum(max_abs, 1.0e-12)
+
+    return processed
 
 
 def _step_metrics(
@@ -173,6 +247,9 @@ def run_stagewise_optax(
     make_step_loss_grad_fn: (
         Callable[[int, int], Callable[[Array], tuple[Array, Array]]] | None
     ) = None,
+    process_grad_fn: Callable[[Array, Array, int, int], Array] | None = None,
+    progress_callback: Callable[[dict[str, float]], None] | None = None,
+    step_callback: Callable[[dict[str, object]], None] | None = None,
 ):
     """Run an Optax optimiser across multiple continuation stages.
 
@@ -189,6 +266,16 @@ def run_stagewise_optax(
         if n_steps <= 0:
             continue
 
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "stage_start",
+                    "stage": float(stage_index),
+                    "n_steps": float(n_steps),
+                    "global_step": float(global_step),
+                }
+            )
+
         loss_grad_fn = make_loss_grad_fn(stage_index)
         optimiser = optimiser_factory()
         state = optimiser.init(model)
@@ -203,14 +290,39 @@ def run_stagewise_optax(
                 if make_step_loss_grad_fn is None
                 else make_step_loss_grad_fn(stage_index, step_in_stage)
             )
+            model_before = model
             loss_value, grad = active_loss_grad_fn(model)
-            updates, state = optimiser.update(grad, state, model)
+            processed_grad = (
+                grad
+                if process_grad_fn is None
+                else process_grad_fn(model, grad, stage_index, step_in_stage)
+            )
+            updates, state = optimiser.update(processed_grad, state, model)
             model = optax.apply_updates(model, updates)
             model = _project_velocity(model, bounds)
 
             metrics = _step_metrics(global_step, model, loss_value, true_model)
             metrics["stage"] = float(stage_index)
+            metrics["step_in_stage"] = float(step_in_stage)
+            metrics["n_steps_in_stage"] = float(n_steps)
             history.append(metrics)
+
+            if progress_callback is not None:
+                progress_callback(dict(metrics))
+            if step_callback is not None:
+                step_callback(
+                    {
+                        "stage_index": stage_index,
+                        "step_in_stage": step_in_stage,
+                        "n_steps_in_stage": n_steps,
+                        "global_step": global_step,
+                        "model_before": model_before,
+                        "model_after": model,
+                        "gradient": grad,
+                        "processed_gradient": processed_grad,
+                        "loss": loss_value,
+                    }
+                )
 
             global_step += 1
             if global_step in snapshot_steps:
