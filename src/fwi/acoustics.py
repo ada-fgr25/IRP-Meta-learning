@@ -169,27 +169,131 @@ def _build_boundary_terms(
     )
 
 
-def _inject_source(
-    source_index: jnp.ndarray,
-    source_value: jnp.ndarray,
+def _inject_linear_point(
+    point_index: jnp.ndarray,
+    point_value: jnp.ndarray,
     shape: tuple[int, int],
 ) -> jnp.ndarray:
-    """Place one source sample onto the full simulation grid."""
+    """Inject a scalar at one nearest-gridpoint location."""
 
-    return jnp.zeros(shape).at[source_index[0], source_index[1]].set(source_value)
+    return jnp.zeros(shape).at[point_index[0], point_index[1]].set(point_value)
+
+
+def _hicks_offsets() -> jnp.ndarray:
+    """Return the fixed Hicks stencil offsets used by the Stride reference."""
+
+    return jnp.arange(-3, 4, dtype=jnp.int32)
+
+
+def _hicks_weights_2d(coefficients: jnp.ndarray) -> jnp.ndarray:
+    """Build separable 2D Hicks weights from `[dim, coeff]` arrays.
+
+    Stride stores an extra trailing coefficient slot (`r+1`), so we keep parity
+    by consuming only the first seven populated taps.
+    """
+
+    wx = coefficients[0, :7]
+    wy = coefficients[1, :7]
+    return wx[:, None] * wy[None, :]
+
+
+def _clip_hicks_indices(indices: jnp.ndarray, max_index: int) -> jnp.ndarray:
+    """Clamp Hicks support indices to valid grid bounds."""
+
+    return jnp.clip(indices, 0, max_index)
+
+
+def _sample_hicks_point(
+    field: jnp.ndarray,
+    reference_gridpoint: jnp.ndarray,
+    coefficients: jnp.ndarray,
+) -> jnp.ndarray:
+    """Sample one point from the grid with Stride-like Hicks interpolation."""
+
+    offsets = _hicks_offsets()
+    ii = _clip_hicks_indices(reference_gridpoint[0] + offsets, field.shape[0] - 1)
+    jj = _clip_hicks_indices(reference_gridpoint[1] + offsets, field.shape[1] - 1)
+    patch = field[ii[:, None], jj[None, :]]
+    return jnp.sum(_hicks_weights_2d(coefficients) * patch)
+
+
+def _inject_hicks_point(
+    reference_gridpoint: jnp.ndarray,
+    coefficients: jnp.ndarray,
+    point_value: jnp.ndarray,
+    shape: tuple[int, int],
+) -> jnp.ndarray:
+    """Scatter one point value onto the grid with Hicks interpolation weights."""
+
+    offsets = _hicks_offsets()
+    ii = _clip_hicks_indices(reference_gridpoint[0] + offsets, shape[0] - 1)
+    jj = _clip_hicks_indices(reference_gridpoint[1] + offsets, shape[1] - 1)
+    weighted = point_value * _hicks_weights_2d(coefficients)
+    return jnp.zeros(shape).at[ii[:, None], jj[None, :]].add(weighted)
+
+
+def _inject_source(
+    source_index: jnp.ndarray,
+    source_reference_gridpoint: jnp.ndarray,
+    source_coefficients: jnp.ndarray,
+    source_value: jnp.ndarray,
+    shape: tuple[int, int],
+    use_hicks: bool,
+) -> jnp.ndarray:
+    """Inject one source sample according to the configured interpolation mode."""
+
+    if use_hicks:
+        return _inject_hicks_point(
+            source_reference_gridpoint,
+            source_coefficients,
+            source_value,
+            shape,
+        )
+    return _inject_linear_point(source_index, source_value, shape)
+
+
+def _sample_receivers(
+    field: jnp.ndarray,
+    receiver_i: jnp.ndarray,
+    receiver_j: jnp.ndarray,
+    receiver_reference_gridpoints: jnp.ndarray,
+    receiver_coefficients: jnp.ndarray,
+    use_hicks: bool,
+) -> jnp.ndarray:
+    """Sample receiver traces from the wavefield in linear or Hicks mode."""
+
+    if use_hicks:
+        return jax.vmap(_sample_hicks_point, in_axes=(None, 0, 0))(
+            field,
+            receiver_reference_gridpoints,
+            receiver_coefficients,
+        )
+    return field[receiver_i, receiver_j]
 
 
 def _inject_receivers(
     receiver_i: jnp.ndarray,
     receiver_j: jnp.ndarray,
+    receiver_reference_gridpoints: jnp.ndarray,
+    receiver_coefficients: jnp.ndarray,
     receiver_values: jnp.ndarray,
     shape: tuple[int, int],
+    use_hicks: bool,
 ) -> jnp.ndarray:
     """Scatter receiver-domain cotangents back onto the grid.
 
-    The injection uses `add` rather than `set` so the code remains correct even
-    if a future geometry reuses the same grid cell for multiple receivers.
+    The injection uses additive scatter so repeated point contributions are
+    accumulated correctly for both nearest-point and Hicks interpolation.
     """
+
+    if use_hicks:
+        per_receiver = jax.vmap(_inject_hicks_point, in_axes=(0, 0, 0, None))(
+            receiver_reference_gridpoints,
+            receiver_coefficients,
+            receiver_values,
+            shape,
+        )
+        return jnp.sum(per_receiver, axis=0)
 
     return jnp.zeros(shape).at[receiver_i, receiver_j].add(receiver_values)
 
@@ -280,9 +384,12 @@ def _propose_next_field(
     u_curr: jnp.ndarray,
     velocity: jnp.ndarray,
     source_index: jnp.ndarray,
+    source_reference_gridpoint: jnp.ndarray,
+    source_coefficients: jnp.ndarray,
     source_sample: jnp.ndarray,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
+    use_hicks: bool,
     config: BrainFWIConfig,
 ) -> jnp.ndarray:
     """Apply one discrete wave-equation step before receiver sampling.
@@ -297,11 +404,24 @@ def _propose_next_field(
     pressure_update = (config.time.dt**2) * _spatial_operator(
         u_curr, velocity_sq, config
     )
-    scaled_source_sample = source_sample * _source_scale(
-        velocity[source_index[0], source_index[1]],
-        config,
+    velocity_at_source = (
+        _sample_hicks_point(
+            velocity,
+            source_reference_gridpoint,
+            source_coefficients,
+        )
+        if use_hicks
+        else velocity[source_index[0], source_index[1]]
     )
-    source_update = _inject_source(source_index, scaled_source_sample, velocity.shape)
+    scaled_source_sample = source_sample * _source_scale(velocity_at_source, config)
+    source_update = _inject_source(
+        source_index,
+        source_reference_gridpoint,
+        source_coefficients,
+        scaled_source_sample,
+        velocity.shape,
+        use_hicks,
+    )
 
     if config.solver.damping_mode == "sponge2":
         # Discrete analogue of Stride's second-order sponge damping term:
@@ -326,10 +446,13 @@ def _advance_state(
     u_curr: jnp.ndarray,
     velocity: jnp.ndarray,
     source_index: jnp.ndarray,
+    source_reference_gridpoint: jnp.ndarray,
+    source_coefficients: jnp.ndarray,
     source_sample: jnp.ndarray,
     active: jnp.ndarray,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
+    use_hicks: bool,
     config: BrainFWIConfig,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Advance the solver state by one step or keep it unchanged if inactive."""
@@ -339,9 +462,12 @@ def _advance_state(
         u_curr,
         velocity,
         source_index,
+        source_reference_gridpoint,
+        source_coefficients,
         source_sample,
         boundary_mask,
         sponge_damp,
+        use_hicks,
         config,
     )
     u_next = jnp.where(active, proposed_u_next, u_curr)
@@ -353,12 +479,17 @@ def _step_shot_state(
     carry: tuple[jnp.ndarray, jnp.ndarray],
     source_value: jnp.ndarray,
     active: jnp.ndarray,
-    source: jnp.ndarray,
+    source_index: jnp.ndarray,
+    source_reference_gridpoint: jnp.ndarray,
+    source_coefficients: jnp.ndarray,
     receiver_i: jnp.ndarray,
     receiver_j: jnp.ndarray,
+    receiver_reference_gridpoints: jnp.ndarray,
+    receiver_coefficients: jnp.ndarray,
     velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
+    use_hicks: bool,
     config: BrainFWIConfig,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -376,14 +507,28 @@ def _step_shot_state(
         u_prev,
         u_curr,
         velocity,
-        source,
+        source_index,
+        source_reference_gridpoint,
+        source_coefficients,
         source_value,
         active,
         boundary_mask,
         sponge_damp,
+        use_hicks,
         config,
     )
-    traces = jnp.where(active, u_next[receiver_i, receiver_j], 0.0)
+    traces = jnp.where(
+        active,
+        _sample_receivers(
+            u_next,
+            receiver_i,
+            receiver_j,
+            receiver_reference_gridpoints,
+            receiver_coefficients,
+            use_hicks,
+        ),
+        0.0,
+    )
     return (next_prev, u_next), (traces, u_prev, u_curr)
 
 
@@ -431,9 +576,26 @@ def _simulate_shot_with_checkpoints(
     """
 
     receivers, _, wavelet = acquisition.require_solver_arrays()
-    source = receivers[shot_index]
+    source_index = receivers[shot_index]
     receiver_i = receivers[:, 0]
     receiver_j = receivers[:, 1]
+    use_hicks = acquisition.interpolation_type == "hicks"
+
+    if use_hicks:
+        source_reference_gridpoint = acquisition.source_reference_gridpoints[shot_index]
+        source_coefficients = acquisition.source_coefficients[shot_index]
+        receiver_reference_gridpoints = acquisition.receiver_reference_gridpoints
+        receiver_coefficients = acquisition.receiver_coefficients
+    else:
+        # Keep lightweight placeholders so the linear path remains unchanged and
+        # all scan-carried shapes stay static under JIT compilation.
+        source_reference_gridpoint = source_index
+        source_coefficients = jnp.zeros((2, 8), dtype=velocity.dtype)
+        receiver_reference_gridpoints = receivers
+        receiver_coefficients = jnp.zeros(
+            (receivers.shape[0], 2, 8),
+            dtype=velocity.dtype,
+        )
     boundary_mask, sponge_damp = _build_boundary_terms(config, velocity)
     source_wavelet = _prepare_source_wavelet(wavelet, config)
     wavelet_segments, active_segments = _segment_wavelet(
@@ -451,12 +613,17 @@ def _simulate_shot_with_checkpoints(
                 state,
                 step_xs[0],
                 step_xs[1],
-                source,
+                source_index,
+                source_reference_gridpoint,
+                source_coefficients,
                 receiver_i,
                 receiver_j,
+                receiver_reference_gridpoints,
+                receiver_coefficients,
                 velocity,
                 boundary_mask,
                 sponge_damp,
+                use_hicks,
                 config,
             ),
             carry,
@@ -476,12 +643,17 @@ def _simulate_shot_with_checkpoints(
 
 def _replay_segment_history(
     start_carry: tuple[jnp.ndarray, jnp.ndarray],
-    source: jnp.ndarray,
+    source_index: jnp.ndarray,
+    source_reference_gridpoint: jnp.ndarray,
+    source_coefficients: jnp.ndarray,
     receiver_i: jnp.ndarray,
     receiver_j: jnp.ndarray,
+    receiver_reference_gridpoints: jnp.ndarray,
+    receiver_coefficients: jnp.ndarray,
     velocity: jnp.ndarray,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
+    use_hicks: bool,
     config: BrainFWIConfig,
     source_block: jnp.ndarray,
     active_block: jnp.ndarray,
@@ -498,12 +670,17 @@ def _replay_segment_history(
             state,
             step_xs[0],
             step_xs[1],
-            source,
+            source_index,
+            source_reference_gridpoint,
+            source_coefficients,
             receiver_i,
             receiver_j,
+            receiver_reference_gridpoints,
+            receiver_coefficients,
             velocity,
             boundary_mask,
             sponge_damp,
+            use_hicks,
             config,
         ),
         start_carry,
@@ -580,7 +757,23 @@ def loss_and_grad(
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
 
-        source = receivers[shot_index]
+        source_index = receivers[shot_index]
+        use_hicks = acquisition.interpolation_type == "hicks"
+        if use_hicks:
+            source_reference_gridpoint = acquisition.source_reference_gridpoints[
+                shot_index
+            ]
+            source_coefficients = acquisition.source_coefficients[shot_index]
+            receiver_reference_gridpoints = acquisition.receiver_reference_gridpoints
+            receiver_coefficients = acquisition.receiver_coefficients
+        else:
+            source_reference_gridpoint = source_index
+            source_coefficients = jnp.zeros((2, 8), dtype=velocity.dtype)
+            receiver_reference_gridpoints = receivers
+            receiver_coefficients = jnp.zeros(
+                (receivers.shape[0], 2, 8),
+                dtype=velocity.dtype,
+            )
         (
             traces,
             checkpoint_prevs,
@@ -627,8 +820,11 @@ def loss_and_grad(
                     + _inject_receivers(
                         receiver_i,
                         receiver_j,
+                        receiver_reference_gridpoints,
+                        receiver_coefficients,
                         data_cotangent,
                         grid_shape,
+                        use_hicks,
                     )
                 )
 
@@ -647,10 +843,13 @@ def loss_and_grad(
                             step_prev,
                             step_curr,
                             step_velocity,
-                            source,
+                            source_index,
+                            source_reference_gridpoint,
+                            source_coefficients,
                             source_block_value,
                             boundary_mask,
                             sponge_damp,
+                            use_hicks,
                             config,
                         ),
                     )
@@ -688,12 +887,17 @@ def loss_and_grad(
             )
             prev_fields, curr_fields = _replay_segment_history(
                 (checkpoint_prev, checkpoint_curr),
-                source,
+                source_index,
+                source_reference_gridpoint,
+                source_coefficients,
                 receiver_i,
                 receiver_j,
+                receiver_reference_gridpoints,
+                receiver_coefficients,
                 velocity,
                 boundary_mask,
                 sponge_damp,
+                use_hicks,
                 config,
                 source_block,
                 active_block,

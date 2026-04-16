@@ -52,6 +52,28 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(params["acquisition"].n_shots, 3)
         self.assertEqual(params["acquisition"].n_receivers, 12)
 
+    def test_hicks_acquisition_builds_precomputed_coefficients(self):
+        """Hicks mode should materialise Stride-like interpolation tensors."""
+
+        base = _tiny_config()
+        hicks_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(base.acquisition, interpolation_type="hicks"),
+            model=base.model,
+            solver=base.solver,
+        )
+        params = init_params(jax.random.PRNGKey(0), config=hicks_config)
+        acquisition = params["acquisition"]
+
+        self.assertEqual(acquisition.interpolation_type, "hicks")
+        self.assertIsNotNone(acquisition.source_reference_gridpoints)
+        self.assertIsNotNone(acquisition.source_coefficients)
+        self.assertIsNotNone(acquisition.receiver_reference_gridpoints)
+        self.assertIsNotNone(acquisition.receiver_coefficients)
+        self.assertEqual(acquisition.source_coefficients.shape, (12, 2, 8))
+        self.assertEqual(acquisition.receiver_coefficients.shape, (12, 2, 8))
+
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
 
@@ -60,6 +82,26 @@ class Phase1BrainFWITests(unittest.TestCase):
 
         self.assertEqual(loss_value.shape, (1,))
         self.assertEqual(grad.shape, params["x0"].shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+
+    def test_hicks_forward_and_gradient_are_finite(self):
+        """The explicit forward/adjoint path should remain stable in Hicks mode."""
+
+        base = _tiny_config()
+        hicks_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(base.acquisition, interpolation_type="hicks"),
+            model=base.model,
+            solver=base.solver,
+        )
+        params = init_params(jax.random.PRNGKey(0), config=hicks_config)
+        traces = forward(params, params["x_exact"])
+        loss_value, grad = dldx(params, params["x0"], (params["y_obs"],))
+
+        self.assertEqual(traces.shape, (3, 40, 12))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces))))
+        self.assertEqual(loss_value.shape, (1,))
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
 
     def test_explicit_adjoint_matches_autodiff_gradient(self):

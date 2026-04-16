@@ -60,6 +60,12 @@ def parse_args():
     parser.add_argument("--n-transducers", type=int, default=256)
     parser.add_argument("--n-shots", type=int, default=256)
     parser.add_argument(
+        "--interpolation-type",
+        choices=["linear", "hicks"],
+        default="linear",
+        help="Source/receiver interpolation mode for the JAX solver.",
+    )
+    parser.add_argument(
         "--checkpoint-interval",
         type=int,
         default=32,
@@ -184,6 +190,7 @@ def build_config(args) -> BrainFWIConfig:
         acquisition=AcquisitionConfig(
             n_transducers=args.n_transducers,
             n_shots=args.n_shots,
+            interpolation_type=args.interpolation_type,
         ),
         model=ModelConfig(),
         solver=SolverConfig(
