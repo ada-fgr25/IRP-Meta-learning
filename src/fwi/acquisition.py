@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
+import scipy.special
 
 from .config import BrainFWIConfig
 
@@ -31,9 +33,15 @@ class AcquisitionGeometry:
     n_transducers: int
     n_shots: int
     n_time_samples: int
+    interpolation_type: str = "linear"
+    transducer_coordinates: jnp.ndarray | None = None
     transducer_indices: jnp.ndarray | None = None
     shot_indices: jnp.ndarray | None = None
     source_wavelet: jnp.ndarray | None = None
+    source_reference_gridpoints: jnp.ndarray | None = None
+    source_coefficients: jnp.ndarray | None = None
+    receiver_reference_gridpoints: jnp.ndarray | None = None
+    receiver_coefficients: jnp.ndarray | None = None
     metadata: tuple[tuple[str, Any], ...] = ()
 
     @property
@@ -106,6 +114,59 @@ def _select_shot_indices(n_transducers: int, n_shots: int) -> jnp.ndarray:
     return jnp.floor(shot_positions).astype(jnp.int32)
 
 
+def _calculate_hicks(
+    coordinates: np.ndarray,
+    *,
+    spacing: tuple[float, float],
+    origin: tuple[float, float],
+    smooth: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replicate Stride's Hicks coefficient construction for 2D points.
+
+    This mirrors the reference implementation's Kaiser-windowed sinc setup:
+    - `kaiser_b = 4.14`
+    - half-width `3`, giving support over offsets `[-3, 3]`
+    - one extra coefficient slot (`r + 1`) kept for parity with the Devito
+      precomputed sparse-function API used by Stride.
+    """
+
+    grid_coordinates = (coordinates - np.asarray(origin)) / np.asarray(spacing)
+    reference_gridpoints = np.floor(grid_coordinates).astype(np.int32)
+    offsets = grid_coordinates - reference_gridpoints
+
+    kaiser_b = 4.14
+    kaiser_half_width = 3
+    kaiser_den = scipy.special.iv(0, kaiser_b)
+    kaiser_extended_width = kaiser_half_width / 0.99
+
+    r = 2 * kaiser_half_width + 1
+    num = coordinates.shape[0]
+    dim = coordinates.shape[1]
+    coefficients = np.zeros((num, dim, r + 1), dtype=np.float32)
+
+    for grid_point in range(-kaiser_half_width, kaiser_half_width + 1):
+        index = kaiser_half_width + grid_point
+        x = offsets - grid_point
+        weights = (x / kaiser_extended_width) ** 2
+        weights = np.minimum(weights, 1.0)
+        b_weights = scipy.special.iv(0, kaiser_b * np.sqrt(1.0 - weights)) / kaiser_den
+        coefficients[:, :, index] = np.sinc(x) * b_weights
+
+    # Stride applies a small optional smoothing tweak for source interpolation.
+    if smooth:
+        n = kaiser_half_width - 1
+        a = coefficients[:, :, n]
+        b = coefficients[:, :, n + 1]
+        c = coefficients[:, :, n + 2]
+        coefficients[:, :, n - 1] = coefficients[:, :, n - 1] + a * 0.01
+        coefficients[:, :, n] = a * 0.98 + b * 0.03
+        coefficients[:, :, n + 1] = b * 0.94 + (a + c) * 0.01
+        coefficients[:, :, n + 2] = c * 0.98 + b * 0.03
+        coefficients[:, :, n + 3] = coefficients[:, :, n + 3] + c * 0.01
+
+    return reference_gridpoints, coefficients
+
+
 def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
     """Create the Stride-inspired elliptical ring used by the JAX solver."""
 
@@ -129,11 +190,48 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
     indices = jnp.rint(coords).astype(jnp.int32)
     shot_indices = _select_shot_indices(acq.n_transducers, acq.n_shots)
 
+    source_reference_gridpoints = None
+    source_coefficients = None
+    receiver_reference_gridpoints = None
+    receiver_coefficients = None
+
+    if acq.interpolation_type == "hicks":
+        # Keep the reference implementation's assumptions:
+        # - physical origin at (0, 0)
+        # - same coordinates used for sources and receivers
+        coordinates_np = np.asarray(coords, dtype=np.float32)
+        spacing = (float(grid.dx), float(grid.dy))
+        origin = (0.0, 0.0)
+
+        src_ref, src_coeff = _calculate_hicks(
+            coordinates_np,
+            spacing=spacing,
+            origin=origin,
+            smooth=True,
+        )
+        rec_ref, rec_coeff = _calculate_hicks(
+            coordinates_np,
+            spacing=spacing,
+            origin=origin,
+            smooth=False,
+        )
+        source_reference_gridpoints = jnp.asarray(src_ref)
+        source_coefficients = jnp.asarray(src_coeff)
+        receiver_reference_gridpoints = jnp.asarray(rec_ref)
+        receiver_coefficients = jnp.asarray(rec_coeff)
+    elif acq.interpolation_type != "linear":
+        raise ValueError(
+            "Unsupported interpolation_type "
+            f"'{acq.interpolation_type}'. Use 'linear' or 'hicks'."
+        )
+
     return AcquisitionGeometry(
         geometry_type="elliptical",
         n_transducers=acq.n_transducers,
         n_shots=int(shot_indices.shape[0]),
         n_time_samples=config.time.nt,
+        interpolation_type=acq.interpolation_type,
+        transducer_coordinates=coords,
         transducer_indices=indices,
         shot_indices=shot_indices,
         source_wavelet=_tone_burst_wavelet(
@@ -143,9 +241,14 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
             acq.source_cycles,
         )
         * acq.source_amplitude,
+        source_reference_gridpoints=source_reference_gridpoints,
+        source_coefficients=source_coefficients,
+        receiver_reference_gridpoints=receiver_reference_gridpoints,
+        receiver_coefficients=receiver_coefficients,
         metadata=(
             ("ellipse_scale_x", acq.ellipse_scale_x),
             ("ellipse_scale_y", acq.ellipse_scale_y),
+            ("interpolation_type", acq.interpolation_type),
             ("source_frequency_hz", acq.source_frequency_hz),
             ("source_cycles", acq.source_cycles),
             # Keeping the amplitude explicit in metadata makes it easier to
@@ -164,5 +267,6 @@ def build_stride_acquisition(reference_settings: dict[str, Any]) -> AcquisitionG
         n_transducers=int(reference_settings["num_locations"]),
         n_shots=int(reference_settings["num_locations"]),
         n_time_samples=int(reference_settings["time_num"]),
+        interpolation_type=str(reference_settings.get("interpolation_type", "linear")),
         metadata=tuple(sorted(reference_settings.items())),
     )

@@ -48,6 +48,10 @@ class AcquisitionConfig:
     full ring as the available shot pool. Per-iteration random shot subsets are
     selected later by the optimiser loop rather than being baked into this
     static acquisition description.
+
+    `interpolation_type` mirrors Stride's receiver/source interpolation switch:
+    - `linear`: simple gridpoint interpolation baseline
+    - `hicks`: sinc/Kaiser-style precomputed interpolation coefficients
     """
 
     n_transducers: int = 256
@@ -57,6 +61,7 @@ class AcquisitionConfig:
     source_frequency_hz: float = 2.5e5
     source_cycles: int = 3
     source_amplitude: float = 1.0
+    interpolation_type: str = "linear"
 
 
 @dataclass(frozen=True)
