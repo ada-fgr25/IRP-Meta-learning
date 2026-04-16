@@ -66,6 +66,48 @@ def parse_args():
         help="Number of time steps to replay per adjoint checkpoint segment.",
     )
     parser.add_argument(
+        "--damping-mode",
+        choices=["legacy", "stride_like", "sponge2"],
+        default="stride_like",
+        help="Boundary damping model used by the JAX solver.",
+    )
+    parser.add_argument(
+        "--damping-type",
+        choices=["sine", "power"],
+        default="sine",
+        help="Profile type used by stride-like/sponge2 damping field construction.",
+    )
+    parser.add_argument(
+        "--damping-cells",
+        type=int,
+        default=40,
+        help="Absorbing-layer width in grid cells.",
+    )
+    parser.add_argument(
+        "--damping-power-degree",
+        type=int,
+        default=2,
+        help="Power exponent used when --damping-type=power.",
+    )
+    parser.add_argument(
+        "--damping-reflection-coefficient",
+        type=float,
+        default=1.0e-3,
+        help="Reflection target used to derive damping strength when not overridden.",
+    )
+    parser.add_argument(
+        "--damping-max-coefficient",
+        type=float,
+        default=None,
+        help="Optional explicit damping coefficient override.",
+    )
+    parser.add_argument(
+        "--damping-velocity-scale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Scale damping by maximum velocity as in Stride's damping helper.",
+    )
+    parser.add_argument(
         "--stride-grad-processing",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -146,6 +188,13 @@ def build_config(args) -> BrainFWIConfig:
         model=ModelConfig(),
         solver=SolverConfig(
             checkpoint_interval=args.checkpoint_interval,
+            damping_mode=args.damping_mode,
+            damping_type=args.damping_type,
+            damping_cells=args.damping_cells,
+            damping_power_degree=args.damping_power_degree,
+            damping_reflection_coefficient=args.damping_reflection_coefficient,
+            damping_max_coefficient=args.damping_max_coefficient,
+            damping_velocity_scale=args.damping_velocity_scale,
             stride_grad_processing=args.stride_grad_processing,
             mask_grad=args.mask_grad,
             smooth_grad=args.smooth_grad,
@@ -681,6 +730,15 @@ def main():
     metrics["shots_per_iter"] = args.shots_per_iter
     metrics["seed"] = args.seed
     metrics["checkpoint_interval"] = config.solver.checkpoint_interval
+    metrics["damping_mode"] = config.solver.damping_mode
+    metrics["damping_type"] = config.solver.damping_type
+    metrics["damping_cells"] = config.solver.damping_cells
+    metrics["damping_power_degree"] = config.solver.damping_power_degree
+    metrics["damping_reflection_coefficient"] = (
+        config.solver.damping_reflection_coefficient
+    )
+    metrics["damping_max_coefficient"] = config.solver.damping_max_coefficient
+    metrics["damping_velocity_scale"] = config.solver.damping_velocity_scale
     metrics["stride_grad_processing"] = config.solver.stride_grad_processing
     metrics["mask_grad"] = config.solver.mask_grad
     metrics["smooth_grad"] = config.solver.smooth_grad
@@ -750,6 +808,12 @@ def main():
     print(f"Max frequencies (Hz): {max_freqs_hz}")
     print(f"Random shots per iteration: {args.shots_per_iter}")
     print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
+    print(
+        "Boundary damping mode/type/cells: "
+        f"{config.solver.damping_mode}/"
+        f"{config.solver.damping_type}/"
+        f"{config.solver.damping_cells}"
+    )
     print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
     print(
         "Grad pipeline (mask/smooth/norm, radius): "
