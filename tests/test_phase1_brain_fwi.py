@@ -50,6 +50,23 @@ def _tiny_config() -> BrainFWIConfig:
     )
 
 
+def _tiny_medium_config() -> BrainFWIConfig:
+    """Return a small configuration with density and attenuation enabled."""
+
+    base = _tiny_config()
+    return BrainFWIConfig(
+        grid=base.grid,
+        time=base.time,
+        acquisition=base.acquisition,
+        model=replace(
+            base.model,
+            density_model="piecewise",
+            attenuation_model="piecewise",
+        ),
+        solver=base.solver,
+    )
+
+
 class Phase1BrainFWITests(unittest.TestCase):
     """Minimal regression tests for the differentiable FWI baseline."""
 
@@ -187,6 +204,44 @@ class Phase1BrainFWITests(unittest.TestCase):
         meta_grad = jax.grad(squared_grad_norm)(params["x0"])
         self.assertEqual(meta_grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(meta_grad))))
+
+    def test_medium_physics_change_the_simulated_wavefield(self):
+        """Density/attenuation support should materially affect traces."""
+
+        baseline_params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        medium_params = init_params(jax.random.PRNGKey(0), config=_tiny_medium_config())
+
+        baseline_traces = forward(baseline_params, baseline_params["x_exact"])
+        medium_traces = forward(medium_params, medium_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(medium_traces))))
+        self.assertFalse(bool(jnp.allclose(baseline_traces, medium_traces)))
+
+    def test_explicit_adjoint_matches_autodiff_with_medium_physics(self):
+        """The explicit adjoint should stay correct with fixed medium fields."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_medium_config())
+        auxs = (params["y_obs"],)
+        backend = build_backend("jax")
+
+        explicit_value, explicit_grad = backend.loss_grad(params, params["x0"], auxs)
+        autodiff_value, autodiff_grad = jax.value_and_grad(
+            lambda model: loss(params, model, auxs).sum()
+        )(params["x0"])
+
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    explicit_value.squeeze(),
+                    autodiff_value,
+                    rtol=1.0e-4,
+                    atol=1.0e-6,
+                )
+            )
+        )
+        self.assertTrue(
+            bool(jnp.allclose(explicit_grad, autodiff_grad, rtol=7.5e-3, atol=7.5e-4))
+        )
 
     def test_stride_source_scale_matches_reference_formula(self):
         """The source scaling should follow the tracked Stride expression."""
