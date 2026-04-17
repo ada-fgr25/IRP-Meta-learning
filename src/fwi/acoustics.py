@@ -13,23 +13,221 @@ import jax.numpy as jnp
 from .acquisition import AcquisitionGeometry
 from .config import BrainFWIConfig
 from .filtering import bandlimit_traces
+from .medium import AcousticMedium
 
 
-def _laplacian(field: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
-    """Second-order finite-difference Laplacian with fixed zero edges.
+_SECOND_DERIVATIVE_WEIGHTS = {
+    2: (-2.0, 1.0),
+    10: (
+        -5269.0 / 1800.0,
+        5.0 / 3.0,
+        -5.0 / 21.0,
+        5.0 / 126.0,
+        -5.0 / 1008.0,
+        1.0 / 3150.0,
+    ),
+}
 
-    We only update the interior cells explicitly and then pad the result back to
-    the full grid shape. The boundary cells themselves are clamped later.
+_FIRST_DERIVATIVE_WEIGHTS = {
+    2: (0.5,),
+    10: (
+        5.0 / 6.0,
+        -5.0 / 21.0,
+        5.0 / 84.0,
+        -5.0 / 504.0,
+        1.0 / 630.0,
+    ),
+}
+
+
+def _first_derivative_1d(
+    field: jnp.ndarray,
+    spacing: float,
+    axis: int,
+    space_order: int,
+) -> jnp.ndarray:
+    """Apply a central finite-difference first derivative along one axis."""
+
+    weights = _FIRST_DERIVATIVE_WEIGHTS.get(space_order)
+    if weights is None:
+        raise ValueError(
+            f"Unsupported space_order '{space_order}'. Use one of "
+            f"{sorted(_FIRST_DERIVATIVE_WEIGHTS)}."
+        )
+
+    radius = len(weights)
+    centre_slices = [slice(None)] * field.ndim
+    centre_slices[axis] = slice(radius, field.shape[axis] - radius)
+    derivative = jnp.zeros_like(field[tuple(centre_slices)])
+
+    for offset, weight in enumerate(weights, start=1):
+        plus_slices = [slice(None)] * field.ndim
+        minus_slices = [slice(None)] * field.ndim
+        plus_slices[axis] = slice(radius + offset, field.shape[axis] - radius + offset)
+        minus_slices[axis] = slice(radius - offset, field.shape[axis] - radius - offset)
+        derivative = derivative + weight * (
+            field[tuple(plus_slices)] - field[tuple(minus_slices)]
+        )
+
+    pad_width = [(0, 0)] * field.ndim
+    pad_width[axis] = (radius, radius)
+    return jnp.pad(derivative / spacing, pad_width)
+
+
+def _second_derivative_1d(
+    field: jnp.ndarray,
+    spacing: float,
+    axis: int,
+    space_order: int,
+) -> jnp.ndarray:
+    """Apply a central finite-difference second derivative along one axis.
+
+    The repository originally used only the three-point stencil. To approach
+    Stride's `space_order=10` behaviour more closely we now support the same
+    higher-order central derivative family on the interior of the padded solver
+    domain, while keeping the outer stencil radius zeroed where insufficient
+    neighbours are available.
     """
 
-    centre = field[1:-1, 1:-1]
-    lap = (field[2:, 1:-1] - 2.0 * centre + field[:-2, 1:-1]) / dx**2 + (
-        field[1:-1, 2:] - 2.0 * centre + field[1:-1, :-2]
-    ) / dy**2
-    return jnp.pad(lap, ((1, 1), (1, 1)))
+    weights = _SECOND_DERIVATIVE_WEIGHTS.get(space_order)
+    if weights is None:
+        raise ValueError(
+            f"Unsupported space_order '{space_order}'. Use one of "
+            f"{sorted(_SECOND_DERIVATIVE_WEIGHTS)}."
+        )
+
+    radius = len(weights) - 1
+    centre_slices = [slice(None)] * field.ndim
+    centre_slices[axis] = slice(radius, field.shape[axis] - radius)
+    derivative = weights[0] * field[tuple(centre_slices)]
+
+    for offset, weight in enumerate(weights[1:], start=1):
+        plus_slices = [slice(None)] * field.ndim
+        minus_slices = [slice(None)] * field.ndim
+        plus_slices[axis] = slice(radius + offset, field.shape[axis] - radius + offset)
+        minus_slices[axis] = slice(radius - offset, field.shape[axis] - radius - offset)
+        derivative = derivative + weight * (
+            field[tuple(plus_slices)] + field[tuple(minus_slices)]
+        )
+
+    pad_width = [(0, 0)] * field.ndim
+    pad_width[axis] = (radius, radius)
+    return jnp.pad(derivative / (spacing**2), pad_width)
 
 
-def _build_damping_mask(config: BrainFWIConfig) -> jnp.ndarray:
+def _laplacian(
+    field: jnp.ndarray,
+    dx: float,
+    dy: float,
+    space_order: int,
+) -> jnp.ndarray:
+    """Finite-difference Laplacian with configurable interior accuracy."""
+
+    return _second_derivative_1d(field, dx, axis=0, space_order=space_order) + (
+        _second_derivative_1d(field, dy, axis=1, space_order=space_order)
+    )
+
+
+def _solver_padding(config: BrainFWIConfig) -> tuple[int, int]:
+    """Return the Stride-like extra halo width on each spatial axis."""
+
+    return (
+        max(int(config.solver.extra_cells_x), 0),
+        max(int(config.solver.extra_cells_y), 0),
+    )
+
+
+def _pad_optional_field_for_solver(
+    field: jnp.ndarray | None,
+    config: BrainFWIConfig,
+) -> jnp.ndarray | None:
+    """Embed an optional medium field in the solver-domain halo."""
+
+    if field is None:
+        return None
+    pad_x, pad_y = _solver_padding(config)
+    return jnp.pad(field, ((pad_x, pad_x), (pad_y, pad_y)), mode="edge")
+
+
+def _pad_model_for_solver(
+    velocity: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Embed the physical model in the larger solver domain.
+
+    Stride solves the wave equation on an extended grid where the physical model
+    sits away from the absorbing frame. We mimic that by edge-padding the
+    inversion model before stepping the wave equation.
+    """
+
+    pad_x, pad_y = _solver_padding(config)
+    return jnp.pad(velocity, ((pad_x, pad_x), (pad_y, pad_y)), mode="edge")
+
+
+def _buoyancy_field(density: jnp.ndarray | None) -> jnp.ndarray | None:
+    """Convert density to buoyancy while guarding against division by zero."""
+
+    if density is None:
+        return None
+    return 1.0 / jnp.maximum(density, 1.0e-8)
+
+
+def _shift_indices_for_solver(
+    indices: jnp.ndarray, config: BrainFWIConfig
+) -> jnp.ndarray:
+    """Shift grid indices from the physical model into the padded solver grid."""
+
+    pad_x, pad_y = _solver_padding(config)
+    shift = jnp.asarray((pad_x, pad_y), dtype=indices.dtype)
+    return indices + shift
+
+
+def _solver_acquisition_views(
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    dtype,
+) -> tuple[
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    jnp.ndarray,
+    bool,
+]:
+    """Return acquisition arrays expressed in solver-domain coordinates."""
+
+    receivers, _, wavelet = acquisition.require_solver_arrays()
+    solver_receivers = _shift_indices_for_solver(receivers, config)
+    use_hicks = acquisition.interpolation_type == "hicks"
+    if use_hicks:
+        source_reference_gridpoints = _shift_indices_for_solver(
+            acquisition.source_reference_gridpoints,
+            config,
+        )
+        receiver_reference_gridpoints = _shift_indices_for_solver(
+            acquisition.receiver_reference_gridpoints,
+            config,
+        )
+        source_coefficients = acquisition.source_coefficients
+        receiver_coefficients = acquisition.receiver_coefficients
+    else:
+        source_reference_gridpoints = solver_receivers
+        receiver_reference_gridpoints = solver_receivers
+        source_coefficients = jnp.zeros((receivers.shape[0], 2, 8), dtype=dtype)
+        receiver_coefficients = jnp.zeros((receivers.shape[0], 2, 8), dtype=dtype)
+    return (
+        solver_receivers,
+        source_reference_gridpoints,
+        source_coefficients,
+        receiver_reference_gridpoints,
+        receiver_coefficients,
+        wavelet,
+        use_hicks,
+    )
+
+
+def _build_damping_mask(config: BrainFWIConfig, shape: tuple[int, int]) -> jnp.ndarray:
     """Create a simple absorbing frame to reduce edge reflections.
 
     This is a pragmatic substitute for a full absorbing boundary model. The mask
@@ -37,8 +235,7 @@ def _build_damping_mask(config: BrainFWIConfig) -> jnp.ndarray:
     would otherwise contaminate the inversion objective.
     """
 
-    nx = config.grid.nx
-    ny = config.grid.ny
+    nx, ny = shape
     cells = config.solver.damping_cells
     strength = config.solver.damping_strength
 
@@ -62,8 +259,8 @@ def _build_stride_like_damping_sigma(
     time stepping.
     """
 
-    nx = int(config.grid.nx)
-    ny = int(config.grid.ny)
+    nx = int(velocity.shape[0])
+    ny = int(velocity.shape[1])
     dx = jnp.asarray(config.grid.dx, dtype=velocity.dtype)
     dy = jnp.asarray(config.grid.dy, dtype=velocity.dtype)
     cells = max(int(config.solver.damping_cells), 0)
@@ -148,7 +345,7 @@ def _build_boundary_terms(
     interior = _build_interior_clamp_mask(config, velocity.shape, velocity.dtype)
 
     if config.solver.damping_mode == "legacy":
-        damping = _build_damping_mask(config).astype(velocity.dtype)
+        damping = _build_damping_mask(config, velocity.shape).astype(velocity.dtype)
         return damping * interior, jnp.zeros_like(velocity)
 
     if config.solver.damping_mode == "stride_like":
@@ -353,36 +550,124 @@ def _source_scale(
     return scale
 
 
+def _spatial_operator_ot2(
+    field: jnp.ndarray,
+    velocity_sq: jnp.ndarray,
+    density: jnp.ndarray | None,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Evaluate the second-order-in-time spatial operator."""
+
+    if density is None:
+        return velocity_sq * _laplacian(
+            field,
+            config.grid.dx,
+            config.grid.dy,
+            config.solver.space_order,
+        )
+
+    buoyancy = _buoyancy_field(density)
+    grad_x = _first_derivative_1d(
+        field,
+        config.grid.dx,
+        axis=0,
+        space_order=config.solver.space_order,
+    )
+    grad_y = _first_derivative_1d(
+        field,
+        config.grid.dy,
+        axis=1,
+        space_order=config.solver.space_order,
+    )
+    div_x = _first_derivative_1d(
+        buoyancy * grad_x,
+        config.grid.dx,
+        axis=0,
+        space_order=config.solver.space_order,
+    )
+    div_y = _first_derivative_1d(
+        buoyancy * grad_y,
+        config.grid.dy,
+        axis=1,
+        space_order=config.solver.space_order,
+    )
+    return velocity_sq * density * (div_x + div_y)
+
+
 def _spatial_operator(
     field: jnp.ndarray,
     velocity_sq: jnp.ndarray,
+    density: jnp.ndarray | None,
     config: BrainFWIConfig,
 ) -> jnp.ndarray:
     """Evaluate the discrete spatial operator used by the current kernel.
 
-    For `OT2`, this is the familiar `vp**2 * Lap(u)`. For `OT4`, we mirror the
-    Stride `IsoAcousticDevito` correction term and add
-    `dt**2 / 12 * vp**2 * Lap(vp**2 * Lap(u))`.
+    For constant density this reduces to `vp**2 * Lap(u)`. When density is
+    provided we approximate Stride's `vp**2 * rho * div(buoy * grad(u))`
+    operator on the collocated JAX grid. For `OT4`, we mirror the
+    `IsoAcousticDevito` correction term by applying the same discrete operator
+    twice.
     """
 
-    laplacian_2 = velocity_sq * _laplacian(field, config.grid.dx, config.grid.dy)
+    operator_2 = _spatial_operator_ot2(field, velocity_sq, density, config)
+
     if config.solver.kernel == "OT2":
-        return laplacian_2
+        return operator_2
     if config.solver.kernel != "OT4":
         raise ValueError(f"Unsupported solver kernel '{config.solver.kernel}'.")
 
-    laplacian_4 = velocity_sq * _laplacian(
-        laplacian_2,
-        config.grid.dx,
-        config.grid.dy,
-    )
-    return laplacian_2 + ((config.time.dt**2) / 12.0) * laplacian_4
+    operator_4 = _spatial_operator_ot2(operator_2, velocity_sq, density, config)
+    return operator_2 + ((config.time.dt**2) / 12.0) * operator_4
+
+
+def _attenuation_update(
+    u_prev: jnp.ndarray,
+    u_curr: jnp.ndarray,
+    velocity: jnp.ndarray,
+    attenuation: jnp.ndarray | None,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Return the explicit attenuation contribution for one time step.
+
+    Stride supports attenuation powers `0` and `2`. We mirror those options in
+    the JAX update while keeping the fields fixed. The returned tensor is the
+    additive contribution that should be combined with the usual pressure and
+    source updates.
+    """
+
+    if attenuation is None:
+        return jnp.zeros_like(u_curr)
+
+    power = int(config.model.attenuation_power)
+    if power == 0:
+        quantity_prev = u_prev
+        quantity_curr = u_curr
+    elif power == 2:
+        quantity_prev = -_laplacian(
+            u_prev,
+            config.grid.dx,
+            config.grid.dy,
+            config.solver.space_order,
+        )
+        quantity_curr = -_laplacian(
+            u_curr,
+            config.grid.dx,
+            config.grid.dy,
+            config.solver.space_order,
+        )
+    else:
+        raise ValueError(f"Unsupported attenuation_power '{power}'. Use 0 or 2.")
+
+    coeff = 2.0 * attenuation * (velocity ** (power + 1))
+    return -config.time.dt * coeff * (quantity_curr - quantity_prev)
 
 
 def _propose_next_field(
     u_prev: jnp.ndarray,
     u_curr: jnp.ndarray,
     velocity: jnp.ndarray,
+    density: jnp.ndarray | None,
+    attenuation: jnp.ndarray | None,
     source_index: jnp.ndarray,
     source_reference_gridpoint: jnp.ndarray,
     source_coefficients: jnp.ndarray,
@@ -402,7 +687,14 @@ def _propose_next_field(
 
     velocity_sq = velocity**2
     pressure_update = (config.time.dt**2) * _spatial_operator(
-        u_curr, velocity_sq, config
+        u_curr, velocity_sq, density, config
+    )
+    attenuation_update = _attenuation_update(
+        u_prev,
+        u_curr,
+        velocity,
+        attenuation,
+        config,
     )
     velocity_at_source = (
         _sample_hicks_point(
@@ -433,18 +725,23 @@ def _propose_next_field(
             2.0 * u_curr
             - (1.0 - sponge_damp) * u_prev
             + pressure_update
+            + attenuation_update
             + source_update
             - (sponge_damp**2) * u_curr
         )
         return boundary_mask * (numerator / (1.0 + sponge_damp))
 
-    return boundary_mask * (2.0 * u_curr - u_prev + pressure_update + source_update)
+    return boundary_mask * (
+        2.0 * u_curr - u_prev + pressure_update + attenuation_update + source_update
+    )
 
 
 def _advance_state(
     u_prev: jnp.ndarray,
     u_curr: jnp.ndarray,
     velocity: jnp.ndarray,
+    density: jnp.ndarray | None,
+    attenuation: jnp.ndarray | None,
     source_index: jnp.ndarray,
     source_reference_gridpoint: jnp.ndarray,
     source_coefficients: jnp.ndarray,
@@ -461,6 +758,8 @@ def _advance_state(
         u_prev,
         u_curr,
         velocity,
+        density,
+        attenuation,
         source_index,
         source_reference_gridpoint,
         source_coefficients,
@@ -487,6 +786,8 @@ def _step_shot_state(
     receiver_reference_gridpoints: jnp.ndarray,
     receiver_coefficients: jnp.ndarray,
     velocity: jnp.ndarray,
+    density: jnp.ndarray | None,
+    attenuation: jnp.ndarray | None,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
     use_hicks: bool,
@@ -507,6 +808,8 @@ def _step_shot_state(
         u_prev,
         u_curr,
         velocity,
+        density,
+        attenuation,
         source_index,
         source_reference_gridpoint,
         source_coefficients,
@@ -565,6 +868,7 @@ def _simulate_shot_with_checkpoints(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None,
     shot_index: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run one shot while storing sparse checkpoints for later recomputation.
@@ -575,28 +879,30 @@ def _simulate_shot_with_checkpoints(
     extra compute for a much smaller peak memory footprint.
     """
 
-    receivers, _, wavelet = acquisition.require_solver_arrays()
-    source_index = receivers[shot_index]
-    receiver_i = receivers[:, 0]
-    receiver_j = receivers[:, 1]
-    use_hicks = acquisition.interpolation_type == "hicks"
-
-    if use_hicks:
-        source_reference_gridpoint = acquisition.source_reference_gridpoints[shot_index]
-        source_coefficients = acquisition.source_coefficients[shot_index]
-        receiver_reference_gridpoints = acquisition.receiver_reference_gridpoints
-        receiver_coefficients = acquisition.receiver_coefficients
-    else:
-        # Keep lightweight placeholders so the linear path remains unchanged and
-        # all scan-carried shapes stay static under JIT compilation.
-        source_reference_gridpoint = source_index
-        source_coefficients = jnp.zeros((2, 8), dtype=velocity.dtype)
-        receiver_reference_gridpoints = receivers
-        receiver_coefficients = jnp.zeros(
-            (receivers.shape[0], 2, 8),
-            dtype=velocity.dtype,
-        )
-    boundary_mask, sponge_damp = _build_boundary_terms(config, velocity)
+    padded_velocity = _pad_model_for_solver(velocity, config)
+    padded_density = _pad_optional_field_for_solver(
+        None if medium is None else medium.density,
+        config,
+    )
+    padded_attenuation = _pad_optional_field_for_solver(
+        None if medium is None else medium.attenuation,
+        config,
+    )
+    (
+        solver_receivers,
+        solver_source_reference_gridpoints,
+        solver_source_coefficients,
+        solver_receiver_reference_gridpoints,
+        solver_receiver_coefficients,
+        wavelet,
+        use_hicks,
+    ) = _solver_acquisition_views(acquisition, config, padded_velocity.dtype)
+    source_index = solver_receivers[shot_index]
+    source_reference_gridpoint = solver_source_reference_gridpoints[shot_index]
+    source_coefficients = solver_source_coefficients[shot_index]
+    receiver_i = solver_receivers[:, 0]
+    receiver_j = solver_receivers[:, 1]
+    boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
     source_wavelet = _prepare_source_wavelet(wavelet, config)
     wavelet_segments, active_segments = _segment_wavelet(
         source_wavelet,
@@ -618,9 +924,11 @@ def _simulate_shot_with_checkpoints(
                 source_coefficients,
                 receiver_i,
                 receiver_j,
-                receiver_reference_gridpoints,
-                receiver_coefficients,
-                velocity,
+                solver_receiver_reference_gridpoints,
+                solver_receiver_coefficients,
+                padded_velocity,
+                padded_density,
+                padded_attenuation,
                 boundary_mask,
                 sponge_damp,
                 use_hicks,
@@ -631,13 +939,13 @@ def _simulate_shot_with_checkpoints(
         )
         return carry, (segment_start_prev, segment_start_curr, segment_traces)
 
-    init = (jnp.zeros_like(velocity), jnp.zeros_like(velocity))
+    init = (jnp.zeros_like(padded_velocity), jnp.zeros_like(padded_velocity))
     _, (checkpoint_prevs, checkpoint_currs, segment_traces) = jax.lax.scan(
         run_segment,
         init,
         (wavelet_segments, active_segments),
     )
-    traces = segment_traces.reshape((-1, receivers.shape[0]))[: wavelet.shape[0]]
+    traces = segment_traces.reshape((-1, solver_receivers.shape[0]))[: wavelet.shape[0]]
     return traces, checkpoint_prevs, checkpoint_currs, wavelet_segments, active_segments
 
 
@@ -651,6 +959,8 @@ def _replay_segment_history(
     receiver_reference_gridpoints: jnp.ndarray,
     receiver_coefficients: jnp.ndarray,
     velocity: jnp.ndarray,
+    density: jnp.ndarray | None,
+    attenuation: jnp.ndarray | None,
     boundary_mask: jnp.ndarray,
     sponge_damp: jnp.ndarray,
     use_hicks: bool,
@@ -678,6 +988,8 @@ def _replay_segment_history(
             receiver_reference_gridpoints,
             receiver_coefficients,
             velocity,
+            density,
+            attenuation,
             boundary_mask,
             sponge_damp,
             use_hicks,
@@ -693,6 +1005,7 @@ def simulate_shot(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None,
     shot_index: jnp.ndarray,
 ) -> jnp.ndarray:
     """Simulate one transmit event and record traces at every transducer.
@@ -703,7 +1016,7 @@ def simulate_shot(
     """
 
     traces, _, _, _, _ = _simulate_shot_with_checkpoints(
-        velocity, acquisition, config, shot_index
+        velocity, acquisition, config, medium, shot_index
     )
     return traces
 
@@ -712,6 +1025,7 @@ def simulate_survey(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None = None,
     shot_indices: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Simulate all configured shots in the acquisition.
@@ -724,7 +1038,7 @@ def simulate_survey(
         acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
     )
     return jax.vmap(
-        lambda shot_idx: simulate_shot(velocity, acquisition, config, shot_idx)
+        lambda shot_idx: simulate_shot(velocity, acquisition, config, medium, shot_idx)
     )(active_shot_indices)
 
 
@@ -732,6 +1046,7 @@ def loss_and_grad(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None,
     observed_data: jnp.ndarray,
     f_max_hz: float | None = None,
     shot_indices: jnp.ndarray | None = None,
@@ -745,35 +1060,43 @@ def loss_and_grad(
     """
 
     dt = config.time.dt
-    receivers, acquisition_shot_indices, _ = acquisition.require_solver_arrays()
+    (
+        receivers,
+        acquisition_shot_indices,
+        _,
+    ) = acquisition.require_solver_arrays()
     active_shot_indices = (
         acquisition_shot_indices if shot_indices is None else shot_indices
     )
-    receiver_i = receivers[:, 0]
-    receiver_j = receivers[:, 1]
-    boundary_mask, sponge_damp = _build_boundary_terms(config, velocity)
-    grid_shape = velocity.shape
+    padded_velocity = _pad_model_for_solver(velocity, config)
+    padded_density = _pad_optional_field_for_solver(
+        None if medium is None else medium.density,
+        config,
+    )
+    padded_attenuation = _pad_optional_field_for_solver(
+        None if medium is None else medium.attenuation,
+        config,
+    )
+    (
+        solver_receivers,
+        solver_source_reference_gridpoints,
+        solver_source_coefficients,
+        solver_receiver_reference_gridpoints,
+        solver_receiver_coefficients,
+        _,
+        use_hicks,
+    ) = _solver_acquisition_views(acquisition, config, padded_velocity.dtype)
+    receiver_i = solver_receivers[:, 0]
+    receiver_j = solver_receivers[:, 1]
+    boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
+    grid_shape = padded_velocity.shape
 
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
 
-        source_index = receivers[shot_index]
-        use_hicks = acquisition.interpolation_type == "hicks"
-        if use_hicks:
-            source_reference_gridpoint = acquisition.source_reference_gridpoints[
-                shot_index
-            ]
-            source_coefficients = acquisition.source_coefficients[shot_index]
-            receiver_reference_gridpoints = acquisition.receiver_reference_gridpoints
-            receiver_coefficients = acquisition.receiver_coefficients
-        else:
-            source_reference_gridpoint = source_index
-            source_coefficients = jnp.zeros((2, 8), dtype=velocity.dtype)
-            receiver_reference_gridpoints = receivers
-            receiver_coefficients = jnp.zeros(
-                (receivers.shape[0], 2, 8),
-                dtype=velocity.dtype,
-            )
+        source_index = solver_receivers[shot_index]
+        source_reference_gridpoint = solver_source_reference_gridpoints[shot_index]
+        source_coefficients = solver_source_coefficients[shot_index]
         (
             traces,
             checkpoint_prevs,
@@ -784,6 +1107,7 @@ def loss_and_grad(
             velocity,
             acquisition,
             config,
+            medium,
             shot_index,
         )
         residual = traces - observed_shot
@@ -792,9 +1116,28 @@ def loss_and_grad(
         # residual gives us the band-limited misfit used for the current stage,
         # and because the filter is symmetric in time the same filtered residual
         # also acts as the trace-domain cotangent for the adjoint.
-        residual = bandlimit_traces(residual, dt, f_max_hz, axis=0)
+        residual = bandlimit_traces(
+            residual,
+            dt,
+            f_max_hz,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+        )
         shot_loss = 0.5 * jnp.sum(residual**2)
-        data_cotangents = residual
+        data_cotangents = bandlimit_traces(
+            residual,
+            dt,
+            f_max_hz,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+            adjoint=not config.solver.trace_filter_zero_phase,
+        )
         padded_data_cotangents = _pad_traces_to_segments(
             data_cotangents,
             wavelet_segments.shape[0],
@@ -820,8 +1163,8 @@ def loss_and_grad(
                     + _inject_receivers(
                         receiver_i,
                         receiver_j,
-                        receiver_reference_gridpoints,
-                        receiver_coefficients,
+                        solver_receiver_reference_gridpoints,
+                        solver_receiver_coefficients,
                         data_cotangent,
                         grid_shape,
                         use_hicks,
@@ -837,12 +1180,15 @@ def loss_and_grad(
                     step_curr: jnp.ndarray,
                     step_velocity: jnp.ndarray,
                 ) -> tuple[jnp.ndarray, jnp.ndarray]:
+                    padded_step_velocity = _pad_model_for_solver(step_velocity, config)
                     return (
                         step_curr,
                         _propose_next_field(
                             step_prev,
                             step_curr,
-                            step_velocity,
+                            padded_step_velocity,
+                            padded_density,
+                            padded_attenuation,
                             source_index,
                             source_reference_gridpoint,
                             source_coefficients,
@@ -892,9 +1238,11 @@ def loss_and_grad(
                 source_coefficients,
                 receiver_i,
                 receiver_j,
-                receiver_reference_gridpoints,
-                receiver_coefficients,
-                velocity,
+                solver_receiver_reference_gridpoints,
+                solver_receiver_coefficients,
+                padded_velocity,
+                padded_density,
+                padded_attenuation,
                 boundary_mask,
                 sponge_damp,
                 use_hicks,
@@ -918,8 +1266,8 @@ def loss_and_grad(
             return carry, None
 
         init_carry = (
-            jnp.zeros_like(velocity),
-            jnp.zeros_like(velocity),
+            jnp.zeros_like(padded_velocity),
+            jnp.zeros_like(padded_velocity),
             jnp.zeros_like(velocity),
         )
         (cotangent_initial_prev, cotangent_initial_curr, shot_grad), _ = jax.lax.scan(

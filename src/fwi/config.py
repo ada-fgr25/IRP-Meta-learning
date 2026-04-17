@@ -66,7 +66,7 @@ class AcquisitionConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Velocity bounds and phantom controls for the inversion model.
+    """Velocity bounds and medium-property controls for the inversion model.
 
     `source` selects whether the experiment uses the lightweight procedural
     phantom or the tracked Stride HDF5 velocity models in `data/`.
@@ -75,6 +75,12 @@ class ModelConfig:
     procedural fallback: coupling medium, soft brain tissue, skull, and a
     lesion-like inclusion. `min_velocity` and `max_velocity` are inversion-time
     box constraints regardless of source.
+
+    `density_model` and `attenuation_model` enable optional fixed medium fields
+    used by the JAX wave solver in addition to the velocity model. The `piecewise`
+    mode maps each cell to the nearest configured anatomical velocity class,
+    which lets both procedural and Stride-loaded velocity models reuse the same
+    density/attenuation lookup without requiring extra HDF5 inputs.
     """
 
     source: str = "stride"
@@ -87,6 +93,17 @@ class ModelConfig:
     lesion_velocity: float = 1650.0
     min_velocity: float = 1450.0
     max_velocity: float = 3000.0
+    density_model: str = "none"
+    background_density: float = 1000.0
+    brain_density: float = 1040.0
+    skull_density: float = 1900.0
+    lesion_density: float = 1080.0
+    attenuation_model: str = "none"
+    attenuation_power: int = 0
+    background_attenuation: float = 0.0
+    brain_attenuation: float = 0.15
+    skull_attenuation: float = 2.5
+    lesion_attenuation: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,13 @@ class SolverConfig:
     the coefficient is derived from absorbing width and spacing.
     `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
     the maximum model velocity when deriving the damping field.
+    `extra_cells_x` and `extra_cells_y` add a fixed halo around the inversion
+    model before the damping frame is applied. This mirrors Stride's use of an
+    extended solver domain, where the absorbing boundary sits outside the
+    physical model rather than directly on its edge.
+    `space_order` sets the order of the central finite-difference stencil used
+    for the spatial derivatives. The default `10` mirrors Stride's Devito
+    configuration much more closely than the previous second-order Laplacian.
     `kernel` selects the time-stepping family used by the JAX solver. `OT4`
     mirrors Stride's default more closely by adding the standard fourth-order
     temporal correction on top of the spatial operator, while `OT2` keeps the
@@ -124,6 +148,10 @@ class SolverConfig:
     `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
     processing switches. `grad_smooth_radius` controls the spatial radius of
     the smoothing kernel when `smooth_grad` is enabled.
+    `trace_filter_type`, `trace_filter_relaxation`, `trace_filter_order`, and
+    `trace_filter_zero_phase` control the trace-domain `f_max` continuation
+    filter. The defaults mirror Stride's low-pass continuation path more
+    closely by using the cosine filter family with relaxation `0.75`.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -137,6 +165,9 @@ class SolverConfig:
     damping_reflection_coefficient: float = 1.0e-3
     damping_max_coefficient: float | None = None
     damping_velocity_scale: bool = True
+    extra_cells_x: int = 50
+    extra_cells_y: int = 50
+    space_order: int = 10
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
     diff_source: bool = False
@@ -145,6 +176,10 @@ class SolverConfig:
     smooth_grad: bool = True
     norm_grad: bool = True
     grad_smooth_radius: int = 2
+    trace_filter_type: str = "cos"
+    trace_filter_relaxation: float = 0.75
+    trace_filter_order: int = 1
+    trace_filter_zero_phase: bool = False
     checkpoint_interval: int = 32
 
 

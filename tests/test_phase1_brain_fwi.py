@@ -11,14 +11,17 @@ import jax
 import jax.numpy as jnp
 
 from fwi.acoustics import _build_boundary_terms, _source_scale
+from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
     GridConfig,
     ModelConfig,
+    SolverConfig,
     TimeConfig,
 )
+from fwi.medium import build_acoustic_medium
 from fwi.optimisers import process_global_gradient_stride_like
 from fwi.problem import (
     build_brain_fwi_problem,
@@ -29,9 +32,11 @@ from fwi.problem import (
     smooth_traces,
 )
 from fwi.run_utils import (
+    clear_run_outputs,
     format_shot_ids_for_log,
     select_final_metric_shot_positions,
     write_run_complete_marker,
+    write_run_state_marker,
 )
 
 
@@ -43,6 +48,24 @@ def _tiny_config() -> BrainFWIConfig:
         time=TimeConfig(nt=40),
         acquisition=AcquisitionConfig(n_transducers=12, n_shots=3),
         model=ModelConfig(source="procedural"),
+        solver=SolverConfig(extra_cells_x=6, extra_cells_y=6, damping_cells=4),
+    )
+
+
+def _tiny_medium_config() -> BrainFWIConfig:
+    """Return a small configuration with density and attenuation enabled."""
+
+    base = _tiny_config()
+    return BrainFWIConfig(
+        grid=base.grid,
+        time=base.time,
+        acquisition=base.acquisition,
+        model=replace(
+            base.model,
+            density_model="piecewise",
+            attenuation_model="piecewise",
+        ),
+        solver=base.solver,
     )
 
 
@@ -58,6 +81,39 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(y_obs.shape, (3, 40, 12))
         self.assertEqual(params["acquisition"].n_shots, 3)
         self.assertEqual(params["acquisition"].n_receivers, 12)
+        self.assertIn("medium", params)
+
+    def test_piecewise_medium_builder_returns_density_and_attenuation_fields(self):
+        """Optional fixed medium fields should be constructible from velocity."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=replace(
+                base.model,
+                density_model="piecewise",
+                attenuation_model="piecewise",
+            ),
+            solver=base.solver,
+        )
+        velocity = jnp.asarray(
+            [
+                [config.model.background_velocity, config.model.brain_velocity],
+                [config.model.skull_velocity, config.model.lesion_velocity],
+            ],
+            dtype=jnp.float32,
+        )
+
+        medium = build_acoustic_medium(config, velocity)
+
+        self.assertIsNotNone(medium.density)
+        self.assertIsNotNone(medium.attenuation)
+        self.assertEqual(medium.density.shape, velocity.shape)
+        self.assertEqual(medium.attenuation.shape, velocity.shape)
+        self.assertTrue(bool(jnp.all(medium.density > 0.0)))
+        self.assertTrue(bool(jnp.all(medium.attenuation >= 0.0)))
 
     def test_hicks_acquisition_builds_precomputed_coefficients(self):
         """Hicks mode should materialise Stride-like interpolation tensors."""
@@ -151,6 +207,44 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(meta_grad.shape, params["x0"].shape)
         self.assertTrue(bool(jnp.all(jnp.isfinite(meta_grad))))
 
+    def test_medium_physics_change_the_simulated_wavefield(self):
+        """Density/attenuation support should materially affect traces."""
+
+        baseline_params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        medium_params = init_params(jax.random.PRNGKey(0), config=_tiny_medium_config())
+
+        baseline_traces = forward(baseline_params, baseline_params["x_exact"])
+        medium_traces = forward(medium_params, medium_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(medium_traces))))
+        self.assertFalse(bool(jnp.allclose(baseline_traces, medium_traces)))
+
+    def test_explicit_adjoint_matches_autodiff_with_medium_physics(self):
+        """The explicit adjoint should stay correct with fixed medium fields."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_medium_config())
+        auxs = (params["y_obs"],)
+        backend = build_backend("jax")
+
+        explicit_value, explicit_grad = backend.loss_grad(params, params["x0"], auxs)
+        autodiff_value, autodiff_grad = jax.value_and_grad(
+            lambda model: loss(params, model, auxs).sum()
+        )(params["x0"])
+
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    explicit_value.squeeze(),
+                    autodiff_value,
+                    rtol=1.0e-4,
+                    atol=1.0e-6,
+                )
+            )
+        )
+        self.assertTrue(
+            bool(jnp.allclose(explicit_grad, autodiff_grad, rtol=7.5e-3, atol=7.5e-4))
+        )
+
     def test_stride_source_scale_matches_reference_formula(self):
         """The source scaling should follow the tracked Stride expression."""
 
@@ -195,6 +289,34 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot2))))
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot4))))
         self.assertFalse(bool(jnp.allclose(traces_ot2, traces_ot4)))
+
+    def test_second_and_tenth_order_stencils_produce_distinct_wavefields(self):
+        """Higher-order spatial derivatives should materially change the traces."""
+
+        base = _tiny_config()
+        so2_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, space_order=2),
+        )
+        so10_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, space_order=10),
+        )
+
+        so2_params = init_params(jax.random.PRNGKey(0), config=so2_config)
+        so10_params = init_params(jax.random.PRNGKey(0), config=so10_config)
+        traces_so2 = forward(so2_params, so2_params["x_exact"])
+        traces_so10 = forward(so10_params, so10_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_so2))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_so10))))
+        self.assertFalse(bool(jnp.allclose(traces_so2, traces_so10)))
 
     def test_stride_like_gradient_processing_masks_normalises_and_smooths(self):
         """Gradient preprocessing should follow the configured stride-like steps."""
@@ -280,6 +402,34 @@ class Phase1BrainFWITests(unittest.TestCase):
             )
         )
 
+    def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
+        """The solver should run on a larger padded grid than the inversion model."""
+
+        config = _tiny_config()
+        velocity = jnp.ones((config.grid.nx, config.grid.ny), dtype=jnp.float32)
+        padded = _pad_model_for_solver(velocity, config)
+
+        self.assertEqual(
+            padded.shape,
+            (
+                config.grid.nx + 2 * config.solver.extra_cells_x,
+                config.grid.ny + 2 * config.solver.extra_cells_y,
+            ),
+        )
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    padded[
+                        config.solver.extra_cells_x : config.solver.extra_cells_x
+                        + config.grid.nx,
+                        config.solver.extra_cells_y : config.solver.extra_cells_y
+                        + config.grid.ny,
+                    ],
+                    velocity,
+                )
+            )
+        )
+
     def test_shot_progress_formatter_compacts_long_batches(self):
         """Shot progress logging should keep long source lists readable."""
 
@@ -314,6 +464,52 @@ class Phase1BrainFWITests(unittest.TestCase):
             self.assertIn('"status": "completed"', payload)
             self.assertIn('"optimizer": "sgd"', payload)
             self.assertIn('"steps": 24', payload)
+
+    def test_run_state_marker_writes_running_payload(self):
+        """Running markers should make in-progress runs easy to identify."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            marker = write_run_state_marker(
+                output_dir,
+                "sgd",
+                state="RUNNING",
+                steps=24,
+                max_freqs_hz=(100000.0, 200000.0, 300000.0),
+                message="Run started.",
+                artifacts={"metrics_json": str(output_dir / "sgd_metrics.json")},
+            )
+
+            self.assertTrue(marker.exists())
+            payload = marker.read_text(encoding="utf-8")
+            self.assertIn('"state": "RUNNING"', payload)
+            self.assertIn('"status": "running"', payload)
+            self.assertIn('"message": "Run started."', payload)
+
+    def test_clear_run_outputs_removes_only_matching_optimizer_artifacts(self):
+        """Output cleanup should not delete artifacts from other optimisers."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            matching = output_dir / "sgd_metrics.json"
+            matching.write_text("{}", encoding="utf-8")
+            matching_diag = output_dir / "sgd_stage01_first_step001_diagnostics.json"
+            matching_diag.write_text("{}", encoding="utf-8")
+            matching_running = output_dir / "sgd_RUNNING.json"
+            matching_running.write_text("{}", encoding="utf-8")
+            other = output_dir / "adam_metrics.json"
+            other.write_text("{}", encoding="utf-8")
+
+            removed = clear_run_outputs(output_dir, "sgd")
+
+            self.assertFalse(matching.exists())
+            self.assertFalse(matching_diag.exists())
+            self.assertFalse(matching_running.exists())
+            self.assertTrue(other.exists())
+            self.assertEqual(
+                {path.name for path in removed},
+                {matching.name, matching_diag.name, matching_running.name},
+            )
 
     def test_final_metric_shot_selection_is_deterministic_and_bounded(self):
         """Final-metric shot subset selection should be stable and valid."""
