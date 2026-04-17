@@ -10,8 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +41,12 @@ from fwi.optimisers import (
     run_stagewise_optax,
 )
 from fwi.problem import dldx, init_params
+from fwi.run_utils import (
+    clear_run_outputs,
+    format_shot_ids_for_log,
+    select_final_metric_shot_positions,
+    write_run_complete_marker,
+)
 
 
 def parse_args():
@@ -186,6 +192,15 @@ def parse_args():
         default=Path("experiments/outputs/phase1_brain_fwi"),
     )
     parser.add_argument(
+        "--clear-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Clear stale artifacts for the selected optimizer in --output-dir "
+            "before starting a new run."
+        ),
+    )
+    parser.add_argument(
         "--show-plots",
         action="store_true",
         help="Display the reconstruction figure in an interactive window as well as saving it.",
@@ -203,6 +218,15 @@ def parse_args():
         help=(
             "Print active source/shot IDs for each step before the batched "
             "forward+adjoint run."
+        ),
+    )
+    parser.add_argument(
+        "--print-execution-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Print timed execution messages for fused forward+adjoint solves "
+            "and forward-only survey passes."
         ),
     )
     parser.add_argument(
@@ -300,24 +324,6 @@ def _build_random_shot_schedule(
     return tuple(schedule)
 
 
-def _select_final_metric_shot_positions(
-    all_shot_indices: jnp.ndarray,
-    final_shots: int | None,
-    seed: int,
-) -> jnp.ndarray:
-    """Select deterministic shot positions used for final metric evaluation."""
-
-    total = int(all_shot_indices.shape[0])
-    if final_shots is None or final_shots <= 0 or final_shots >= total:
-        return jnp.arange(total, dtype=jnp.int32)
-
-    rng = np.random.default_rng(seed + 7_919)
-    chosen = np.sort(
-        rng.choice(np.arange(total, dtype=np.int32), size=final_shots, replace=False)
-    )
-    return jnp.asarray(chosen, dtype=jnp.int32)
-
-
 def _shared_limits(images):
     """Return a common color scale for a collection of absolute model images."""
 
@@ -410,6 +416,7 @@ def _save_iteration_diagnostics(
     args,
     acquisition: object,
     config: BrainFWIConfig,
+    medium: object,
     dt: float,
     model: jnp.ndarray,
     gradient: jnp.ndarray,
@@ -427,12 +434,36 @@ def _save_iteration_diagnostics(
 ) -> None:
     """Persist diagnostics for one selected optimiser iteration."""
 
+    if args.print_progress and args.print_execution_progress:
+        stage_h = stage_index + 1
+        step_h = step_index + 1
+        print(
+            f"[stage {stage_h}/{len(_parse_frequency_schedule(args.max_freqs_hz))} "
+            f"step {step_h}/{n_steps_in_stage}] execute | "
+            "phase=forward-only diagnostics survey",
+            flush=True,
+        )
+    survey_start = perf_counter()
     modelled_batch = simulate_survey(
         model,
         acquisition,
         config,
+        medium=medium,
         shot_indices=active_shot_indices,
     )
+    modelled_batch = _wait_for_jax_result(modelled_batch)
+    survey_elapsed = perf_counter() - survey_start
+    if args.print_progress and args.print_execution_progress:
+        stage_h = stage_index + 1
+        step_h = step_index + 1
+        print(
+            f"[stage {stage_h}/{len(_parse_frequency_schedule(args.max_freqs_hz))} "
+            f"step {step_h}/{n_steps_in_stage}] done | "
+            "phase=forward-only diagnostics survey | "
+            f"elapsed={survey_elapsed:.2f}s",
+            flush=True,
+        )
+
     residual = bandlimit_traces(modelled_batch - observed_batch, dt, fmax_hz)
 
     grad_norm = float(jnp.linalg.norm(gradient))
@@ -583,47 +614,10 @@ def _diagnostic_steps_for_stage(n_steps: int) -> dict[int, str]:
     return mapping
 
 
-def _format_shot_ids_for_log(shot_ids: jnp.ndarray, max_items: int = 8) -> str:
-    """Build a compact preview string for active source/shot IDs."""
+def _wait_for_jax_result(value):
+    """Block on a JAX value/tree so wall-clock timings reflect real execution."""
 
-    values = [int(v) for v in jnp.asarray(shot_ids).tolist()]
-    if len(values) <= max_items:
-        return str(values)
-    head_count = max_items // 2
-    tail_count = max_items - head_count
-    return f"{values[:head_count]} ... {values[-tail_count:]} (total={len(values)})"
-
-
-def _write_run_complete_marker(
-    output_dir: Path,
-    optimizer: str,
-    *,
-    steps: int,
-    max_freqs_hz: tuple[float, ...],
-    metrics_path: Path,
-    history_path: Path,
-    reconstruction_path: Path,
-    history_plot_path: Path,
-) -> Path:
-    """Persist an explicit completion marker for long WSL runs."""
-
-    marker_path = output_dir / f"{optimizer}_RUN_COMPLETE.json"
-    payload = {
-        "status": "completed",
-        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
-        "optimizer": optimizer,
-        "steps": int(steps),
-        "max_freqs_hz": [float(v) for v in max_freqs_hz],
-        "artifacts": {
-            "metrics_json": str(metrics_path),
-            "history_json": str(history_path),
-            "reconstruction_png": str(reconstruction_path),
-            "history_png": str(history_plot_path),
-        },
-    }
-    with marker_path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
-    return marker_path
+    return jax.tree_util.tree_map(jax.block_until_ready, value)
 
 
 def main():
@@ -631,6 +625,19 @@ def main():
 
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.clear_output:
+        removed_outputs = clear_run_outputs(args.output_dir, args.optimizer)
+        if removed_outputs:
+            print(
+                f"Cleared {len(removed_outputs)} stale '{args.optimizer}' artifacts "
+                f"from {args.output_dir}",
+                flush=True,
+            )
+        else:
+            print(
+                f"No stale '{args.optimizer}' artifacts found in {args.output_dir}",
+                flush=True,
+            )
 
     config = build_config(args)
     max_freqs_hz = _parse_frequency_schedule(args.max_freqs_hz)
@@ -651,6 +658,7 @@ def main():
     diagnostic_steps_by_stage = tuple(
         _diagnostic_steps_for_stage(n_steps) for n_steps in stage_steps
     )
+    solve_timings: dict[tuple[int, int], float] = {}
 
     def progress_callback(event: dict[str, float]) -> None:
         """Print compact progress lines so long runs are easier to monitor."""
@@ -680,11 +688,16 @@ def main():
             shot_schedule[stage_zero_based][step_in_stage - 1].shape[0]
         )
         loss_value = float(event["loss"])
+        step_timing = solve_timings.get((stage_zero_based, step_in_stage - 1))
+        timing_suffix = (
+            "" if step_timing is None else f" | forward+adjoint={step_timing:.2f}s"
+        )
         print(
             f"[stage {stage}/{len(stage_steps)} step {step_in_stage}/{n_steps_in_stage}] "
             f"global_step={global_step} | "
             f"shots={shot_batch_size} | "
-            f"loss={loss_value:.6e}",
+            f"loss={loss_value:.6e}"
+            f"{timing_suffix}",
             flush=True,
         )
 
@@ -710,7 +723,29 @@ def main():
 
     def make_loss_grad_fn(stage_index: int):
         fmax_hz = max_freqs_hz[stage_index]
-        return lambda model: full_loss_grad(model, fmax_hz=fmax_hz)
+        stage_h = stage_index + 1
+
+        def timed_full_loss_grad(model):
+            if args.print_progress and args.print_execution_progress:
+                print(
+                    f"[stage {stage_h}/{len(stage_steps)}] execute | "
+                    "phase=forward+adjoint (full survey)",
+                    flush=True,
+                )
+            start = perf_counter()
+            result = full_loss_grad(model, fmax_hz=fmax_hz)
+            loss_value, grad = _wait_for_jax_result(result)
+            elapsed = perf_counter() - start
+            if args.print_progress and args.print_execution_progress:
+                print(
+                    f"[stage {stage_h}/{len(stage_steps)}] done | "
+                    "phase=forward+adjoint (full survey) | "
+                    f"elapsed={elapsed:.2f}s",
+                    flush=True,
+                )
+            return loss_value, grad
+
+        return timed_full_loss_grad
 
     def make_step_loss_grad_fn(stage_index: int, step_index: int):
         shot_positions = shot_schedule[stage_index][step_index]
@@ -722,19 +757,45 @@ def main():
             stage_h = stage_index + 1
             step_h = step_index + 1
             n_steps_h = stage_steps[stage_index]
-            shot_preview = _format_shot_ids_for_log(active_shot_indices)
+            shot_preview = format_shot_ids_for_log(active_shot_indices)
             print(
                 f"[stage {stage_h}/{len(stage_steps)} step {step_h}/{n_steps_h}] "
                 f"active source ids={shot_preview}",
                 flush=True,
             )
 
-        return lambda model: batched_loss_grad(
-            model,
-            observed_batch,
-            active_shot_indices,
-            fmax_hz=fmax_hz,
-        )
+        def timed_batched_loss_grad(model):
+            stage_h = stage_index + 1
+            step_h = step_index + 1
+            n_steps_h = stage_steps[stage_index]
+            if args.print_progress and args.print_execution_progress:
+                print(
+                    f"[stage {stage_h}/{len(stage_steps)} step {step_h}/{n_steps_h}] "
+                    "execute | phase=forward+adjoint | "
+                    f"f_max={fmax_hz:.0f} Hz | "
+                    f"sources={format_shot_ids_for_log(active_shot_indices)}",
+                    flush=True,
+                )
+            start = perf_counter()
+            result = batched_loss_grad(
+                model,
+                observed_batch,
+                active_shot_indices,
+                fmax_hz=fmax_hz,
+            )
+            loss_value, grad = _wait_for_jax_result(result)
+            elapsed = perf_counter() - start
+            solve_timings[(stage_index, step_index)] = elapsed
+            if args.print_progress and args.print_execution_progress:
+                print(
+                    f"[stage {stage_h}/{len(stage_steps)} step {step_h}/{n_steps_h}] "
+                    "done | phase=forward+adjoint | "
+                    f"elapsed={elapsed:.2f}s",
+                    flush=True,
+                )
+            return loss_value, grad
+
+        return timed_batched_loss_grad
 
     def step_callback(event: dict[str, object]) -> None:
         """Save diagnostics at selected points for each continuation block."""
@@ -764,6 +825,7 @@ def main():
             args=args,
             acquisition=params["acquisition"],
             config=params["config"],
+            medium=params["medium"],
             dt=params["config"].time.dt,
             model=model_before,
             gradient=gradient,
@@ -945,7 +1007,7 @@ def main():
     print(f"Saved reconstruction plot to: {reconstruction_path}")
     print(f"Saved optimisation history plot to: {history_plot_path}")
     print(f"Saved optimisation history to: {history_path}")
-    final_metric_positions = _select_final_metric_shot_positions(
+    final_metric_positions = select_final_metric_shot_positions(
         all_shot_indices,
         args.final_shots,
         args.seed,
@@ -962,12 +1024,22 @@ def main():
         flush=True,
     )
 
+    final_survey_start = perf_counter()
     y_hat = simulate_survey(
         x_hat,
         params["acquisition"],
         config,
+        medium=params["medium"],
         shot_indices=final_metric_shot_indices,
     )
+    y_hat = _wait_for_jax_result(y_hat)
+    final_survey_elapsed = perf_counter() - final_survey_start
+    if args.print_progress and args.print_execution_progress:
+        print(
+            "Completed final forward-only survey for metrics | "
+            f"elapsed={final_survey_elapsed:.2f}s",
+            flush=True,
+        )
     full_metrics = compute_metrics(x_hat, x_exact, y_hat, observed_for_metrics)
     metrics["data_rmse"] = full_metrics["data_rmse"]
     metrics["data_mae"] = full_metrics["data_mae"]
@@ -999,7 +1071,7 @@ def main():
         f"{config.solver.grad_smooth_radius}"
     )
     print(f"Saved metrics to: {metrics_path}")
-    run_complete_marker = _write_run_complete_marker(
+    run_complete_marker = write_run_complete_marker(
         args.output_dir,
         args.optimizer,
         steps=args.steps,
@@ -1008,6 +1080,12 @@ def main():
         history_path=history_path,
         reconstruction_path=reconstruction_path,
         history_plot_path=history_plot_path,
+    )
+    print(
+        "Wrote completion marker "
+        f"({run_complete_marker.name}) so long runs have an explicit "
+        "success artifact pointing at the final outputs.",
+        flush=True,
     )
     print(f"Saved completion marker to: {run_complete_marker}")
 

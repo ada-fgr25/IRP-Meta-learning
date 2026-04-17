@@ -73,3 +73,31 @@ def write_run_complete_marker(
     with marker_path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     return marker_path
+
+
+def clear_run_outputs(output_dir: Path, optimizer: str) -> list[Path]:
+    """Remove stale artifacts for one optimiser without touching other runs.
+
+    We intentionally clear only files owned by the current optimiser prefix so
+    repeated `sgd` runs do not leave stale plots/JSON behind, while unrelated
+    `adam` or `lbfgsb` artifacts in the same directory remain available for
+    comparison.
+    """
+
+    patterns = (
+        f"{optimizer}_metrics.json",
+        f"{optimizer}_history.json",
+        f"{optimizer}_history.png",
+        f"{optimizer}_reconstruction.png",
+        f"{optimizer}_RUN_COMPLETE.json",
+        f"{optimizer}_stage*_diagnostics.json",
+        f"{optimizer}_stage*_diagnostics.png",
+    )
+
+    removed: list[Path] = []
+    for pattern in patterns:
+        for path in output_dir.glob(pattern):
+            if path.exists() and path.is_file():
+                path.unlink()
+                removed.append(path)
+    return sorted(removed)

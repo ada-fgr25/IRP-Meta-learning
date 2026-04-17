@@ -32,6 +32,7 @@ from fwi.problem import (
     smooth_traces,
 )
 from fwi.run_utils import (
+    clear_run_outputs,
     format_shot_ids_for_log,
     select_final_metric_shot_positions,
     write_run_complete_marker,
@@ -462,6 +463,27 @@ class Phase1BrainFWITests(unittest.TestCase):
             self.assertIn('"status": "completed"', payload)
             self.assertIn('"optimizer": "sgd"', payload)
             self.assertIn('"steps": 24', payload)
+
+    def test_clear_run_outputs_removes_only_matching_optimizer_artifacts(self):
+        """Output cleanup should not delete artifacts from other optimisers."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            matching = output_dir / "sgd_metrics.json"
+            matching.write_text("{}", encoding="utf-8")
+            matching_diag = output_dir / "sgd_stage01_first_step001_diagnostics.json"
+            matching_diag.write_text("{}", encoding="utf-8")
+            other = output_dir / "adam_metrics.json"
+            other.write_text("{}", encoding="utf-8")
+
+            removed = clear_run_outputs(output_dir, "sgd")
+
+            self.assertFalse(matching.exists())
+            self.assertFalse(matching_diag.exists())
+            self.assertTrue(other.exists())
+            self.assertEqual(
+                {path.name for path in removed}, {matching.name, matching_diag.name}
+            )
 
     def test_final_metric_shot_selection_is_deterministic_and_bounded(self):
         """Final-metric shot subset selection should be stable and valid."""
