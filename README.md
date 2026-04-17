@@ -164,6 +164,21 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * optimisation history in JSON
 * a `<optimizer>_RUN_COMPLETE.json` marker written at successful end-of-run
 
+Runtime troubleshooting:
+
+* If logs show `An NVIDIA GPU may be present ... Falling back to cpu`, your
+  environment has CPU-only `jaxlib`. Install a CUDA-enabled JAX build for your
+  CUDA version, then verify with:
+
+```bash
+python -c "import jax; print(jax.devices())"
+```
+
+* Hicks interpolation now converts grid-index transducer coordinates to
+  physical coordinates before building Stride-style precomputed coefficients.
+  If you ever see a run where Hicks mode reports near-zero loss and gradient at
+  every step, double-check that you are on a version containing this fix.
+
 The script now writes reconstruction/history artifacts before the expensive
 final full-survey metric pass, so late memory failures no longer leave those
 plots stale from a previous run.
