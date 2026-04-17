@@ -108,6 +108,10 @@ class SolverConfig:
     the coefficient is derived from absorbing width and spacing.
     `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
     the maximum model velocity when deriving the damping field.
+    `extra_cells_x` and `extra_cells_y` add a fixed halo around the inversion
+    model before the damping frame is applied. This mirrors Stride's use of an
+    extended solver domain, where the absorbing boundary sits outside the
+    physical model rather than directly on its edge.
     `kernel` selects the time-stepping family used by the JAX solver. `OT4`
     mirrors Stride's default more closely by adding the standard fourth-order
     temporal correction on top of the spatial operator, while `OT2` keeps the
@@ -141,6 +145,8 @@ class SolverConfig:
     damping_reflection_coefficient: float = 1.0e-3
     damping_max_coefficient: float | None = None
     damping_velocity_scale: bool = True
+    extra_cells_x: int = 50
+    extra_cells_y: int = 50
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
     diff_source: bool = False

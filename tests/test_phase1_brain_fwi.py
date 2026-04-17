@@ -11,12 +11,14 @@ import jax
 import jax.numpy as jnp
 
 from fwi.acoustics import _build_boundary_terms, _source_scale
+from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
     GridConfig,
     ModelConfig,
+    SolverConfig,
     TimeConfig,
 )
 from fwi.optimisers import process_global_gradient_stride_like
@@ -43,6 +45,7 @@ def _tiny_config() -> BrainFWIConfig:
         time=TimeConfig(nt=40),
         acquisition=AcquisitionConfig(n_transducers=12, n_shots=3),
         model=ModelConfig(source="procedural"),
+        solver=SolverConfig(extra_cells_x=4, extra_cells_y=3, damping_cells=4),
     )
 
 
@@ -277,6 +280,34 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(
             bool(
                 jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
+            )
+        )
+
+    def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
+        """The solver should run on a larger padded grid than the inversion model."""
+
+        config = _tiny_config()
+        velocity = jnp.ones((config.grid.nx, config.grid.ny), dtype=jnp.float32)
+        padded = _pad_model_for_solver(velocity, config)
+
+        self.assertEqual(
+            padded.shape,
+            (
+                config.grid.nx + 2 * config.solver.extra_cells_x,
+                config.grid.ny + 2 * config.solver.extra_cells_y,
+            ),
+        )
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    padded[
+                        config.solver.extra_cells_x : config.solver.extra_cells_x
+                        + config.grid.nx,
+                        config.solver.extra_cells_y : config.solver.extra_cells_y
+                        + config.grid.ny,
+                    ],
+                    velocity,
+                )
             )
         )
 
