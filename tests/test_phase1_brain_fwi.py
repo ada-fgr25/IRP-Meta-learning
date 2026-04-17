@@ -36,6 +36,7 @@ from fwi.run_utils import (
     format_shot_ids_for_log,
     select_final_metric_shot_positions,
     write_run_complete_marker,
+    write_run_state_marker,
 )
 
 
@@ -464,6 +465,27 @@ class Phase1BrainFWITests(unittest.TestCase):
             self.assertIn('"optimizer": "sgd"', payload)
             self.assertIn('"steps": 24', payload)
 
+    def test_run_state_marker_writes_running_payload(self):
+        """Running markers should make in-progress runs easy to identify."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            marker = write_run_state_marker(
+                output_dir,
+                "sgd",
+                state="RUNNING",
+                steps=24,
+                max_freqs_hz=(100000.0, 200000.0, 300000.0),
+                message="Run started.",
+                artifacts={"metrics_json": str(output_dir / "sgd_metrics.json")},
+            )
+
+            self.assertTrue(marker.exists())
+            payload = marker.read_text(encoding="utf-8")
+            self.assertIn('"state": "RUNNING"', payload)
+            self.assertIn('"status": "running"', payload)
+            self.assertIn('"message": "Run started."', payload)
+
     def test_clear_run_outputs_removes_only_matching_optimizer_artifacts(self):
         """Output cleanup should not delete artifacts from other optimisers."""
 
@@ -473,6 +495,8 @@ class Phase1BrainFWITests(unittest.TestCase):
             matching.write_text("{}", encoding="utf-8")
             matching_diag = output_dir / "sgd_stage01_first_step001_diagnostics.json"
             matching_diag.write_text("{}", encoding="utf-8")
+            matching_running = output_dir / "sgd_RUNNING.json"
+            matching_running.write_text("{}", encoding="utf-8")
             other = output_dir / "adam_metrics.json"
             other.write_text("{}", encoding="utf-8")
 
@@ -480,9 +504,11 @@ class Phase1BrainFWITests(unittest.TestCase):
 
             self.assertFalse(matching.exists())
             self.assertFalse(matching_diag.exists())
+            self.assertFalse(matching_running.exists())
             self.assertTrue(other.exists())
             self.assertEqual(
-                {path.name for path in removed}, {matching.name, matching_diag.name}
+                {path.name for path in removed},
+                {matching.name, matching_diag.name, matching_running.name},
             )
 
     def test_final_metric_shot_selection_is_deterministic_and_bounded(self):

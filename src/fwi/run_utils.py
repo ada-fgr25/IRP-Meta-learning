@@ -75,6 +75,43 @@ def write_run_complete_marker(
     return marker_path
 
 
+def write_run_state_marker(
+    output_dir: Path,
+    optimizer: str,
+    *,
+    state: str,
+    steps: int,
+    max_freqs_hz: tuple[float, ...],
+    message: str | None = None,
+    artifacts: dict[str, str] | None = None,
+) -> Path:
+    """Persist a coarse run-state marker such as RUNNING or FAILED.
+
+    These markers are intentionally lightweight. They let us tell at a glance
+    whether the latest run for one optimiser is still in progress, completed
+    cleanly, or died before the final completion marker was written.
+    """
+
+    state_upper = state.upper()
+    state_lower = state.lower()
+    marker_path = output_dir / f"{optimizer}_{state_upper}.json"
+    payload = {
+        "status": state_lower,
+        "state": state_upper,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "optimizer": optimizer,
+        "steps": int(steps),
+        "max_freqs_hz": [float(v) for v in max_freqs_hz],
+    }
+    if message is not None:
+        payload["message"] = str(message)
+    if artifacts:
+        payload["artifacts"] = dict(artifacts)
+    with marker_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    return marker_path
+
+
 def clear_run_outputs(output_dir: Path, optimizer: str) -> list[Path]:
     """Remove stale artifacts for one optimiser without touching other runs.
 
@@ -89,6 +126,8 @@ def clear_run_outputs(output_dir: Path, optimizer: str) -> list[Path]:
         f"{optimizer}_history.json",
         f"{optimizer}_history.png",
         f"{optimizer}_reconstruction.png",
+        f"{optimizer}_RUNNING.json",
+        f"{optimizer}_FAILED.json",
         f"{optimizer}_RUN_COMPLETE.json",
         f"{optimizer}_stage*_diagnostics.json",
         f"{optimizer}_stage*_diagnostics.png",
