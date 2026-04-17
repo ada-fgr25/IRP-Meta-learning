@@ -792,9 +792,28 @@ def loss_and_grad(
         # residual gives us the band-limited misfit used for the current stage,
         # and because the filter is symmetric in time the same filtered residual
         # also acts as the trace-domain cotangent for the adjoint.
-        residual = bandlimit_traces(residual, dt, f_max_hz, axis=0)
+        residual = bandlimit_traces(
+            residual,
+            dt,
+            f_max_hz,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+        )
         shot_loss = 0.5 * jnp.sum(residual**2)
-        data_cotangents = residual
+        data_cotangents = bandlimit_traces(
+            residual,
+            dt,
+            f_max_hz,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+            adjoint=not config.solver.trace_filter_zero_phase,
+        )
         padded_data_cotangents = _pad_traces_to_segments(
             data_cotangents,
             wavelet_segments.shape[0],

@@ -124,6 +124,10 @@ class SolverConfig:
     `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
     processing switches. `grad_smooth_radius` controls the spatial radius of
     the smoothing kernel when `smooth_grad` is enabled.
+    `trace_filter_type`, `trace_filter_relaxation`, `trace_filter_order`, and
+    `trace_filter_zero_phase` control the trace-domain `f_max` continuation
+    filter. The defaults mirror Stride's low-pass continuation path more
+    closely by using the cosine filter family with relaxation `0.75`.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -145,6 +149,10 @@ class SolverConfig:
     smooth_grad: bool = True
     norm_grad: bool = True
     grad_smooth_radius: int = 2
+    trace_filter_type: str = "cos"
+    trace_filter_relaxation: float = 0.75
+    trace_filter_order: int = 1
+    trace_filter_zero_phase: bool = False
     checkpoint_interval: int = 32
 
 

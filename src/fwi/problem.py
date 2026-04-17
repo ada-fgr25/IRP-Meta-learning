@@ -192,7 +192,15 @@ def loss(params, x, auxs):
     shot_indices = auxs[2] if len(auxs) > 2 else None
     y = forward(params, x, shot_indices=shot_indices)
     residual = y - y_obs
-    residual = bandlimit_traces(residual, params["config"].time.dt, f_max_hz)
+    residual = bandlimit_traces(
+        residual,
+        params["config"].time.dt,
+        f_max_hz,
+        filter_type=params["config"].solver.trace_filter_type,
+        relaxation=params["config"].solver.trace_filter_relaxation,
+        order=params["config"].solver.trace_filter_order,
+        zero_phase=params["config"].solver.trace_filter_zero_phase,
+    )
     return (0.5 * jnp.sum(residual**2)).reshape((1,))
 
 
