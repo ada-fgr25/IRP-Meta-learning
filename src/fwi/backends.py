@@ -24,8 +24,14 @@ class JaxBackend:
 
         return build_elliptical_acquisition(config)
 
-    def forward(self, velocity, acquisition, config, shot_indices=None):
-        return simulate_survey(velocity, acquisition, config, shot_indices=shot_indices)
+    def forward(self, velocity, acquisition, config, medium=None, shot_indices=None):
+        return simulate_survey(
+            velocity,
+            acquisition,
+            config,
+            medium=medium,
+            shot_indices=shot_indices,
+        )
 
     def loss_grad(self, params, x, auxs):
         """Return the explicit adjoint-state loss gradient in pure JAX."""
@@ -34,6 +40,7 @@ class JaxBackend:
             x,
             params["acquisition"],
             params["config"],
+            params.get("medium"),
             auxs[0],
             auxs[1] if len(auxs) > 1 else None,
             auxs[2] if len(auxs) > 2 else None,
@@ -56,8 +63,8 @@ class DevitoBackend:
                 "Phase 1 baseline, or install the optional `devito` extra."
             ) from exc
 
-    def forward(self, velocity, geometry, config, shot_indices=None):
-        del shot_indices
+    def forward(self, velocity, geometry, config, medium=None, shot_indices=None):
+        del shot_indices, medium
         raise NotImplementedError(
             "A Devito-backed differentiable wrapper has not been implemented yet. "
             "The current baseline uses a JAX-native solver to keep the full "
@@ -83,10 +90,10 @@ class StrideBackend:
         del config
         return build_stride_acquisition(self.runner.reference_settings())
 
-    def forward(self, velocity, acquisition, config, shot_indices=None):
+    def forward(self, velocity, acquisition, config, medium=None, shot_indices=None):
         """The Stride benchmark path does not provide an in-process forward op."""
 
-        del velocity, acquisition, config, shot_indices
+        del velocity, acquisition, config, medium, shot_indices
         raise NotImplementedError(
             "The Stride backend is benchmark-only in this repository. Use the "
             "tracked scripts through `StrideBenchmarkRunner` rather than an "

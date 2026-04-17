@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from .acquisition import AcquisitionGeometry
 from .config import BrainFWIConfig
 from .filtering import bandlimit_traces
+from .medium import AcousticMedium
 
 
 _SECOND_DERIVATIVE_WEIGHTS = {
@@ -824,6 +825,7 @@ def simulate_shot(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None,
     shot_index: jnp.ndarray,
 ) -> jnp.ndarray:
     """Simulate one transmit event and record traces at every transducer.
@@ -843,6 +845,7 @@ def simulate_survey(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None = None,
     shot_indices: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Simulate all configured shots in the acquisition.
@@ -855,7 +858,7 @@ def simulate_survey(
         acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
     )
     return jax.vmap(
-        lambda shot_idx: simulate_shot(velocity, acquisition, config, shot_idx)
+        lambda shot_idx: simulate_shot(velocity, acquisition, config, medium, shot_idx)
     )(active_shot_indices)
 
 
@@ -863,6 +866,7 @@ def loss_and_grad(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
     config: BrainFWIConfig,
+    medium: AcousticMedium | None,
     observed_data: jnp.ndarray,
     f_max_hz: float | None = None,
     shot_indices: jnp.ndarray | None = None,

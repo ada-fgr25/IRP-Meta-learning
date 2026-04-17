@@ -21,6 +21,7 @@ from fwi.config import (
     SolverConfig,
     TimeConfig,
 )
+from fwi.medium import build_acoustic_medium
 from fwi.optimisers import process_global_gradient_stride_like
 from fwi.problem import (
     build_brain_fwi_problem,
@@ -61,6 +62,39 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(y_obs.shape, (3, 40, 12))
         self.assertEqual(params["acquisition"].n_shots, 3)
         self.assertEqual(params["acquisition"].n_receivers, 12)
+        self.assertIn("medium", params)
+
+    def test_piecewise_medium_builder_returns_density_and_attenuation_fields(self):
+        """Optional fixed medium fields should be constructible from velocity."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=replace(
+                base.model,
+                density_model="piecewise",
+                attenuation_model="piecewise",
+            ),
+            solver=base.solver,
+        )
+        velocity = jnp.asarray(
+            [
+                [config.model.background_velocity, config.model.brain_velocity],
+                [config.model.skull_velocity, config.model.lesion_velocity],
+            ],
+            dtype=jnp.float32,
+        )
+
+        medium = build_acoustic_medium(config, velocity)
+
+        self.assertIsNotNone(medium.density)
+        self.assertIsNotNone(medium.attenuation)
+        self.assertEqual(medium.density.shape, velocity.shape)
+        self.assertEqual(medium.attenuation.shape, velocity.shape)
+        self.assertTrue(bool(jnp.all(medium.density > 0.0)))
+        self.assertTrue(bool(jnp.all(medium.attenuation >= 0.0)))
 
     def test_hicks_acquisition_builds_precomputed_coefficients(self):
         """Hicks mode should materialise Stride-like interpolation tensors."""

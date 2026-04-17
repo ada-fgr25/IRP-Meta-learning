@@ -66,7 +66,7 @@ class AcquisitionConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Velocity bounds and phantom controls for the inversion model.
+    """Velocity bounds and medium-property controls for the inversion model.
 
     `source` selects whether the experiment uses the lightweight procedural
     phantom or the tracked Stride HDF5 velocity models in `data/`.
@@ -75,6 +75,12 @@ class ModelConfig:
     procedural fallback: coupling medium, soft brain tissue, skull, and a
     lesion-like inclusion. `min_velocity` and `max_velocity` are inversion-time
     box constraints regardless of source.
+
+    `density_model` and `attenuation_model` enable optional fixed medium fields
+    used by the JAX wave solver in addition to the velocity model. The `piecewise`
+    mode maps each cell to the nearest configured anatomical velocity class,
+    which lets both procedural and Stride-loaded velocity models reuse the same
+    density/attenuation lookup without requiring extra HDF5 inputs.
     """
 
     source: str = "stride"
@@ -87,6 +93,17 @@ class ModelConfig:
     lesion_velocity: float = 1650.0
     min_velocity: float = 1450.0
     max_velocity: float = 3000.0
+    density_model: str = "none"
+    background_density: float = 1000.0
+    brain_density: float = 1040.0
+    skull_density: float = 1900.0
+    lesion_density: float = 1080.0
+    attenuation_model: str = "none"
+    attenuation_power: int = 0
+    background_attenuation: float = 0.0
+    brain_attenuation: float = 0.15
+    skull_attenuation: float = 2.5
+    lesion_attenuation: float = 0.25
 
 
 @dataclass(frozen=True)

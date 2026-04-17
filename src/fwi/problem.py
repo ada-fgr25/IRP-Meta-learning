@@ -16,6 +16,7 @@ import jax.numpy as jnp
 from .backends import build_backend
 from .config import BrainFWIConfig
 from .filtering import bandlimit_traces
+from .medium import AcousticMedium, build_acoustic_medium
 from .phantoms import build_initial_velocity, build_true_brain_velocity
 
 
@@ -34,6 +35,7 @@ class FWIProblem:
     x0: jnp.ndarray
     x_exact: jnp.ndarray
     y_obs: jnp.ndarray
+    medium: AcousticMedium
 
     def as_params(self) -> dict[str, object]:
         """Convert the structured object into the legacy dictionary surface."""
@@ -46,6 +48,7 @@ class FWIProblem:
             "x0": self.x0,
             "x_exact": self.x_exact,
             "y_obs": self.y_obs,
+            "medium": self.medium,
             "auxs_shapes": (self.y_obs.shape,),
         }
 
@@ -122,9 +125,10 @@ def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "
     del key
     config = config or BrainFWIConfig()
     config, x_exact, x0 = _initialise_models(config)
+    medium = build_acoustic_medium(config, x_exact)
     backend = build_backend(backend_name)
     acquisition = backend.build_acquisition(config)
-    y_obs = backend.forward(x_exact, acquisition, config)
+    y_obs = backend.forward(x_exact, acquisition, config, medium=medium)
 
     return FWIProblem(
         config=config,
@@ -133,6 +137,7 @@ def init_params(key, config: BrainFWIConfig | None = None, backend_name: str = "
         x0=x0,
         x_exact=x_exact,
         y_obs=y_obs,
+        medium=medium,
     ).as_params()
 
 
@@ -149,9 +154,10 @@ def build_brain_fwi_problem(
     del key
     config = config or BrainFWIConfig()
     config, x_exact, x0 = _initialise_models(config)
+    medium = build_acoustic_medium(config, x_exact)
     backend = build_backend(backend_name)
     acquisition = backend.build_acquisition(config)
-    y_obs = backend.forward(x_exact, acquisition, config)
+    y_obs = backend.forward(x_exact, acquisition, config, medium=medium)
     return FWIProblem(
         config=config,
         backend_name=backend_name,
@@ -159,6 +165,7 @@ def build_brain_fwi_problem(
         x0=x0,
         x_exact=x_exact,
         y_obs=y_obs,
+        medium=medium,
     )
 
 
@@ -174,6 +181,7 @@ def forward(params, x, shot_indices: jnp.ndarray | None = None):
         x,
         params["acquisition"],
         params["config"],
+        medium=params.get("medium"),
         shot_indices=shot_indices,
     )
 
