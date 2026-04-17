@@ -45,7 +45,7 @@ def _tiny_config() -> BrainFWIConfig:
         time=TimeConfig(nt=40),
         acquisition=AcquisitionConfig(n_transducers=12, n_shots=3),
         model=ModelConfig(source="procedural"),
-        solver=SolverConfig(extra_cells_x=4, extra_cells_y=3, damping_cells=4),
+        solver=SolverConfig(extra_cells_x=6, extra_cells_y=6, damping_cells=4),
     )
 
 
@@ -198,6 +198,34 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot2))))
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces_ot4))))
         self.assertFalse(bool(jnp.allclose(traces_ot2, traces_ot4)))
+
+    def test_second_and_tenth_order_stencils_produce_distinct_wavefields(self):
+        """Higher-order spatial derivatives should materially change the traces."""
+
+        base = _tiny_config()
+        so2_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, space_order=2),
+        )
+        so10_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, space_order=10),
+        )
+
+        so2_params = init_params(jax.random.PRNGKey(0), config=so2_config)
+        so10_params = init_params(jax.random.PRNGKey(0), config=so10_config)
+        traces_so2 = forward(so2_params, so2_params["x_exact"])
+        traces_so10 = forward(so10_params, so10_params["x_exact"])
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_so2))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(traces_so10))))
+        self.assertFalse(bool(jnp.allclose(traces_so2, traces_so10)))
 
     def test_stride_like_gradient_processing_masks_normalises_and_smooths(self):
         """Gradient preprocessing should follow the configured stride-like steps."""

@@ -15,18 +15,71 @@ from .config import BrainFWIConfig
 from .filtering import bandlimit_traces
 
 
-def _laplacian(field: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
-    """Second-order finite-difference Laplacian with fixed zero edges.
+_SECOND_DERIVATIVE_WEIGHTS = {
+    2: (-2.0, 1.0),
+    10: (
+        -5269.0 / 1800.0,
+        5.0 / 3.0,
+        -5.0 / 21.0,
+        5.0 / 126.0,
+        -5.0 / 1008.0,
+        1.0 / 3150.0,
+    ),
+}
 
-    We only update the interior cells explicitly and then pad the result back to
-    the full grid shape. The boundary cells themselves are clamped later.
+
+def _second_derivative_1d(
+    field: jnp.ndarray,
+    spacing: float,
+    axis: int,
+    space_order: int,
+) -> jnp.ndarray:
+    """Apply a central finite-difference second derivative along one axis.
+
+    The repository originally used only the three-point stencil. To approach
+    Stride's `space_order=10` behaviour more closely we now support the same
+    higher-order central derivative family on the interior of the padded solver
+    domain, while keeping the outer stencil radius zeroed where insufficient
+    neighbours are available.
     """
 
-    centre = field[1:-1, 1:-1]
-    lap = (field[2:, 1:-1] - 2.0 * centre + field[:-2, 1:-1]) / dx**2 + (
-        field[1:-1, 2:] - 2.0 * centre + field[1:-1, :-2]
-    ) / dy**2
-    return jnp.pad(lap, ((1, 1), (1, 1)))
+    weights = _SECOND_DERIVATIVE_WEIGHTS.get(space_order)
+    if weights is None:
+        raise ValueError(
+            f"Unsupported space_order '{space_order}'. Use one of "
+            f"{sorted(_SECOND_DERIVATIVE_WEIGHTS)}."
+        )
+
+    radius = len(weights) - 1
+    centre_slices = [slice(None)] * field.ndim
+    centre_slices[axis] = slice(radius, field.shape[axis] - radius)
+    derivative = weights[0] * field[tuple(centre_slices)]
+
+    for offset, weight in enumerate(weights[1:], start=1):
+        plus_slices = [slice(None)] * field.ndim
+        minus_slices = [slice(None)] * field.ndim
+        plus_slices[axis] = slice(radius + offset, field.shape[axis] - radius + offset)
+        minus_slices[axis] = slice(radius - offset, field.shape[axis] - radius - offset)
+        derivative = derivative + weight * (
+            field[tuple(plus_slices)] + field[tuple(minus_slices)]
+        )
+
+    pad_width = [(0, 0)] * field.ndim
+    pad_width[axis] = (radius, radius)
+    return jnp.pad(derivative / (spacing**2), pad_width)
+
+
+def _laplacian(
+    field: jnp.ndarray,
+    dx: float,
+    dy: float,
+    space_order: int,
+) -> jnp.ndarray:
+    """Finite-difference Laplacian with configurable interior accuracy."""
+
+    return _second_derivative_1d(field, dx, axis=0, space_order=space_order) + (
+        _second_derivative_1d(field, dy, axis=1, space_order=space_order)
+    )
 
 
 def _solver_padding(config: BrainFWIConfig) -> tuple[int, int]:
@@ -443,7 +496,12 @@ def _spatial_operator(
     `dt**2 / 12 * vp**2 * Lap(vp**2 * Lap(u))`.
     """
 
-    laplacian_2 = velocity_sq * _laplacian(field, config.grid.dx, config.grid.dy)
+    laplacian_2 = velocity_sq * _laplacian(
+        field,
+        config.grid.dx,
+        config.grid.dy,
+        config.solver.space_order,
+    )
     if config.solver.kernel == "OT2":
         return laplacian_2
     if config.solver.kernel != "OT4":
@@ -453,6 +511,7 @@ def _spatial_operator(
         laplacian_2,
         config.grid.dx,
         config.grid.dy,
+        config.solver.space_order,
     )
     return laplacian_2 + ((config.time.dt**2) / 12.0) * laplacian_4
 

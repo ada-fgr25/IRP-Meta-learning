@@ -112,6 +112,9 @@ class SolverConfig:
     model before the damping frame is applied. This mirrors Stride's use of an
     extended solver domain, where the absorbing boundary sits outside the
     physical model rather than directly on its edge.
+    `space_order` sets the order of the central finite-difference stencil used
+    for the spatial derivatives. The default `10` mirrors Stride's Devito
+    configuration much more closely than the previous second-order Laplacian.
     `kernel` selects the time-stepping family used by the JAX solver. `OT4`
     mirrors Stride's default more closely by adding the standard fourth-order
     temporal correction on top of the spatial operator, while `OT2` keeps the
@@ -147,6 +150,7 @@ class SolverConfig:
     damping_velocity_scale: bool = True
     extra_cells_x: int = 50
     extra_cells_y: int = 50
+    space_order: int = 10
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
     diff_source: bool = False
