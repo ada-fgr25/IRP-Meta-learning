@@ -843,6 +843,13 @@ def main():
     )
     metrics["damping_max_coefficient"] = config.solver.damping_max_coefficient
     metrics["damping_velocity_scale"] = config.solver.damping_velocity_scale
+    metrics["extra_cells_x"] = config.solver.extra_cells_x
+    metrics["extra_cells_y"] = config.solver.extra_cells_y
+    metrics["space_order"] = config.solver.space_order
+    metrics["trace_filter_type"] = config.solver.trace_filter_type
+    metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
+    metrics["trace_filter_order"] = config.solver.trace_filter_order
+    metrics["trace_filter_zero_phase"] = config.solver.trace_filter_zero_phase
     metrics["stride_grad_processing"] = config.solver.stride_grad_processing
     metrics["mask_grad"] = config.solver.mask_grad
     metrics["smooth_grad"] = config.solver.smooth_grad
