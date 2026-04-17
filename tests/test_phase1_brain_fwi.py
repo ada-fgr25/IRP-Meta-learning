@@ -137,6 +137,21 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(acquisition.source_coefficients.shape, (12, 2, 8))
         self.assertEqual(acquisition.receiver_coefficients.shape, (12, 2, 8))
 
+        # Regression guard: Hicks reference points should stay in grid-index
+        # coordinates. If coordinate units drift (for example dividing by grid
+        # spacing twice), these values become extremely large and collapse
+        # interpolation to boundary-clipped samples.
+        src_refs = acquisition.source_reference_gridpoints
+        rec_refs = acquisition.receiver_reference_gridpoints
+        self.assertGreaterEqual(int(jnp.min(src_refs[:, 0])), 0)
+        self.assertGreaterEqual(int(jnp.min(src_refs[:, 1])), 0)
+        self.assertLess(int(jnp.max(src_refs[:, 0])), hicks_config.grid.nx)
+        self.assertLess(int(jnp.max(src_refs[:, 1])), hicks_config.grid.ny)
+        self.assertGreaterEqual(int(jnp.min(rec_refs[:, 0])), 0)
+        self.assertGreaterEqual(int(jnp.min(rec_refs[:, 1])), 0)
+        self.assertLess(int(jnp.max(rec_refs[:, 0])), hicks_config.grid.nx)
+        self.assertLess(int(jnp.max(rec_refs[:, 1])), hicks_config.grid.ny)
+
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
 
@@ -166,6 +181,10 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(traces))))
         self.assertEqual(loss_value.shape, (1,))
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+        # The Hicks path should produce a meaningful residual signal for the
+        # initial model, not a degenerate zero-loss/zero-gradient trajectory.
+        self.assertGreater(float(loss_value.squeeze()), 0.0)
+        self.assertGreater(float(jnp.linalg.norm(grad)), 0.0)
 
     def test_explicit_adjoint_matches_autodiff_gradient(self):
         """The explicit adjoint should agree with a direct autodiff reference."""
