@@ -61,6 +61,25 @@ def parse_args():
     parser.add_argument("--n-transducers", type=int, default=256)
     parser.add_argument("--n-shots", type=int, default=256)
     parser.add_argument(
+        "--density-model",
+        choices=["none", "homogeneous", "piecewise"],
+        default="none",
+        help="Optional fixed density field used alongside the velocity model.",
+    )
+    parser.add_argument(
+        "--attenuation-model",
+        choices=["none", "homogeneous", "piecewise"],
+        default="none",
+        help="Optional fixed attenuation field used alongside the velocity model.",
+    )
+    parser.add_argument(
+        "--attenuation-power",
+        choices=[0, 2],
+        type=int,
+        default=0,
+        help="Attenuation power used when attenuation is enabled.",
+    )
+    parser.add_argument(
         "--interpolation-type",
         choices=["linear", "hicks"],
         default="linear",
@@ -211,7 +230,11 @@ def build_config(args) -> BrainFWIConfig:
             n_shots=args.n_shots,
             interpolation_type=args.interpolation_type,
         ),
-        model=ModelConfig(),
+        model=ModelConfig(
+            density_model=args.density_model,
+            attenuation_model=args.attenuation_model,
+            attenuation_power=args.attenuation_power,
+        ),
         solver=SolverConfig(
             checkpoint_interval=args.checkpoint_interval,
             damping_mode=args.damping_mode,
@@ -828,6 +851,9 @@ def main():
     metrics["n_shots"] = config.acquisition.n_shots
     metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
     metrics["model_source"] = config.model.source
+    metrics["density_model"] = config.model.density_model
+    metrics["attenuation_model"] = config.model.attenuation_model
+    metrics["attenuation_power"] = config.model.attenuation_power
     metrics["max_freqs_hz"] = list(max_freqs_hz)
     metrics["stage_steps"] = list(stage_steps)
     metrics["shots_per_iter"] = args.shots_per_iter
