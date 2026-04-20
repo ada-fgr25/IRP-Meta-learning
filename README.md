@@ -151,6 +151,7 @@ Useful options include:
 * `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
 * `--forward-shot-batch-size` to control forward-only survey batching (diagnostics/metrics): `1` is lowest memory, larger values can improve throughput
 * `--grad-shot-batch-size` to control forward+adjoint shot batching during gradient accumulation: `1` is lowest memory, larger values can improve throughput
+* `--source-window-enabled`, `--source-window-alpha`, `--source-window-start`, and `--source-window-stop` to control Stride-like Tukey source preprocessing before injection
 * `--print-shot-progress` to print active source IDs for each step (useful for long runs)
 * `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update
 * `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments. If reflection is omitted, the default follows Stride's absorbing-width heuristic.
@@ -200,6 +201,7 @@ Parity note:
 * The `sponge2` boundary path now tracks Stride defaults more closely by leaving the update mask fully active (no hard edge clamp) and deriving the reflection coefficient from absorbing width when not explicitly overridden.
 * The `sponge2` stencil now also applies local `vp^2` scaling in the damped second-order update, matching the way Stride's Devito acoustic stencil injects the sponge boundary term.
 * Stride-like damping field construction now uses pointwise local velocity scaling rather than a global maximum-velocity scale when velocity scaling is enabled.
+* Source preprocessing now mirrors Stride's forward setup more closely by applying a configurable Tukey window over a configurable time-bounds interval before source injection.
 * Forward-only survey calls (observation generation, diagnostics, and final metrics) now use a dedicated no-checkpoint path, and optionally support controlled shot mini-batching via `forward_shot_batch_size` for better speed/memory tuning.
 * The explicit adjoint accumulation now also supports optional shot mini-batching (`grad_shot_batch_size`) while preserving the same objective/gradient through masked tail handling on partial batches.
 * Boundary damping still supports three JAX-side modes: `legacy` taper mask, `stride_like` absorbing-profile mask, and a Stride-inspired `sponge2` damped second-order update. This improves boundary parity substantially, but it is still not a full Devito boundary operator implementation.

@@ -38,6 +38,7 @@ The current backend split is now:
 * The JAX `sponge2` boundary path now aligns more closely with Stride defaults by removing hard edge clamping and using Stride's absorbing-width reflection-coefficient heuristic when not overridden.
 * The JAX `sponge2` update now also mirrors the Devito stencil's local `vp^2` scaling of the sponge boundary term in the second-order time update.
 * Stride-like damping-field velocity scaling in JAX now follows Stride's pointwise local-velocity scaling behavior rather than applying a global max-velocity factor.
+* JAX source preprocessing now includes Stride-like Tukey windowing with configurable time bounds, matching the source-window preparation pattern used in Stride's Devito forward setup.
 * The JAX solver now has a dedicated forward-only survey path that avoids adjoint checkpoint tensor allocation; forward-only calls can optionally batch shots in small vmapped chunks to tune throughput versus memory.
 * The explicit JAX adjoint path now also supports optional shot mini-batching during gradient accumulation, while preserving equivalence to sequential accumulation by masking partial-tail batches.
 * The remaining deliberate gaps are still important when interpreting results: the lack of a full complex-frequency-shift PML2 auxiliary-field system and the lack of direct buoyancy/attenuation parameter inversion still differ from the full Devito operator stack.
