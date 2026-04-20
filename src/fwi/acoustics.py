@@ -358,7 +358,11 @@ def _build_boundary_terms(
         # Stride's SpongeBoundary2 scales damping by 7*dt before injecting it in
         # the second-order damped update equation.
         sponge_damp = jnp.asarray(7.0, dtype=velocity.dtype) * sigma * config.time.dt
-        return interior, sponge_damp
+        # Stride's boundary operator updates both interior and absorbing
+        # subdomains without forcing the outer stencil rows/columns to zero.
+        # Returning an all-ones mask keeps the update active everywhere and lets
+        # the sponge damping field itself define where attenuation is applied.
+        return jnp.ones_like(velocity), sponge_damp
 
     raise ValueError(
         f"Unsupported damping_mode '{config.solver.damping_mode}'. "

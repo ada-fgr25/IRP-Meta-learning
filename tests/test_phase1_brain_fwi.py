@@ -507,8 +507,10 @@ class Phase1BrainFWITests(unittest.TestCase):
         velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
         mask, sponge_damp = _build_boundary_terms(config, velocity)
 
-        self.assertTrue(bool(jnp.all(mask >= 0.0)))
-        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        # Stride's sponge boundary path applies damping terms directly rather
+        # than masking edge rows/columns to zero, so the update mask should be
+        # fully active.
+        self.assertTrue(bool(jnp.allclose(mask, 1.0)))
         self.assertGreater(float(jnp.max(sponge_damp)), 0.0)
         self.assertTrue(
             bool(
