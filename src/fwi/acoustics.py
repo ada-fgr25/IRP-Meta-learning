@@ -269,8 +269,15 @@ def _build_stride_like_damping_sigma(
 
     damping_type = config.solver.damping_type
     power_degree = max(int(config.solver.damping_power_degree), 1)
+    reflection_coeff = config.solver.damping_reflection_coefficient
+    if reflection_coeff is None:
+        # Match Stride's boundary default used by `SpongeBoundary2` and related
+        # helpers when no explicit reflection coefficient is provided.
+        reflection_coeff = 10.0 ** (
+            -(jnp.log10(jnp.maximum(cells, 1.0)) - 1.0) / jnp.log10(2.0) - 3.0
+        )
     reflection = jnp.asarray(
-        max(float(config.solver.damping_reflection_coefficient), 1.0e-12),
+        jnp.maximum(jnp.asarray(reflection_coeff), 1.0e-12),
         dtype=velocity.dtype,
     )
 

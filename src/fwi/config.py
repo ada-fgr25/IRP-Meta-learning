@@ -120,7 +120,8 @@ class SolverConfig:
     mode (`sine` or `power`). `damping_power_degree` is used when
     `damping_type='power'`.
     `damping_reflection_coefficient` mirrors Stride's coefficient used to
-    derive a physically motivated damping scale from the absorbing width.
+    derive a physically motivated damping scale from the absorbing width. When
+    omitted (`None`), we follow Stride's default width-dependent heuristic.
     `damping_max_coefficient` can override that derived scale. If it is `None`,
     the coefficient is derived from absorbing width and spacing.
     `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
@@ -168,7 +169,7 @@ class SolverConfig:
     damping_mode: str = "stride_like"
     damping_type: str = "sine"
     damping_power_degree: int = 2
-    damping_reflection_coefficient: float = 1.0e-3
+    damping_reflection_coefficient: float | None = None
     damping_max_coefficient: float | None = None
     damping_velocity_scale: bool = True
     extra_cells_x: int = 50

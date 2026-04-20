@@ -518,6 +518,45 @@ class Phase1BrainFWITests(unittest.TestCase):
             )
         )
 
+    def test_sponge2_default_reflection_matches_stride_width_rule(self):
+        """Default reflection coefficient should follow Stride's width heuristic."""
+
+        base = _tiny_config()
+        cells = 12
+        reflection = 10.0 ** (-(jnp.log10(float(cells)) - 1.0) / jnp.log10(2.0) - 3.0)
+
+        auto_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=cells,
+                damping_reflection_coefficient=None,
+            ),
+        )
+        explicit_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=cells,
+                damping_reflection_coefficient=float(reflection),
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+
+        _, damp_auto = _build_boundary_terms(auto_config, velocity)
+        _, damp_explicit = _build_boundary_terms(explicit_config, velocity)
+        self.assertTrue(
+            bool(jnp.allclose(damp_auto, damp_explicit, rtol=1.0e-6, atol=1.0e-8))
+        )
+
     def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
         """The solver should run on a larger padded grid than the inversion model."""
 

@@ -125,8 +125,11 @@ def parse_args():
     parser.add_argument(
         "--damping-reflection-coefficient",
         type=float,
-        default=1.0e-3,
-        help="Reflection target used to derive damping strength when not overridden.",
+        default=None,
+        help=(
+            "Optional reflection target used to derive damping strength. "
+            "If omitted, use Stride's default width-dependent heuristic."
+        ),
     )
     parser.add_argument(
         "--damping-max-coefficient",
