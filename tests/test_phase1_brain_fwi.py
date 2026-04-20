@@ -12,7 +12,9 @@ import jax.numpy as jnp
 
 from fwi.acoustics import (
     _build_boundary_terms,
+    _prepare_source_wavelet,
     _source_scale,
+    _stride_like_source_window,
     loss_and_grad,
     simulate_survey,
     simulate_survey_forward_only,
@@ -217,6 +219,62 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreaterEqual(int(jnp.min(rec_refs[:, 1])), 0)
         self.assertLess(int(jnp.max(rec_refs[:, 0])), hicks_config.grid.nx)
         self.assertLess(int(jnp.max(rec_refs[:, 1])), hicks_config.grid.ny)
+
+    def test_stride_like_source_window_respects_time_bounds(self):
+        """Source window should be non-zero only inside requested bounds."""
+
+        window = _stride_like_source_window(
+            n_time=16,
+            start=3,
+            stop=10,
+            alpha=1.0e-3,
+            dtype=jnp.float32,
+        )
+
+        self.assertEqual(window.shape, (16,))
+        self.assertTrue(bool(jnp.allclose(window[:3], 0.0)))
+        self.assertTrue(bool(jnp.allclose(window[10:], 0.0)))
+        self.assertGreater(float(jnp.sum(window[3:10])), 0.0)
+
+    def test_prepare_source_wavelet_applies_stride_like_windowing(self):
+        """Source preparation should apply Tukey window when enabled."""
+
+        base = _tiny_config()
+        config_with_window = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=True,
+                source_window_alpha=1.0e-3,
+                source_window_start=4,
+                source_window_stop=12,
+                diff_source=False,
+            ),
+        )
+        config_no_window = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=False,
+                diff_source=False,
+            ),
+        )
+        wavelet = jnp.ones((base.time.nt,), dtype=jnp.float32)
+
+        with_window = _prepare_source_wavelet(wavelet, config_with_window)
+        without_window = _prepare_source_wavelet(wavelet, config_no_window)
+
+        self.assertEqual(with_window.shape, wavelet.shape)
+        self.assertTrue(bool(jnp.allclose(without_window, wavelet)))
+        self.assertTrue(bool(jnp.allclose(with_window[:4], 0.0)))
+        self.assertTrue(bool(jnp.allclose(with_window[12:], 0.0)))
+        self.assertGreater(float(jnp.sum(with_window[4:12])), 0.0)
 
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
