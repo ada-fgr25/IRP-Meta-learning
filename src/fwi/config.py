@@ -158,6 +158,9 @@ class SolverConfig:
     `forward_shot_batch_size` controls shot-level batching for forward-only
     surveys (for example diagnostics and final metrics). `1` is the most
     memory-conservative setting; larger values trade memory for throughput.
+    `grad_shot_batch_size` controls shot-level batching for the forward+adjoint
+    gradient path. `1` keeps the most conservative sequential accumulation.
+    Higher values can improve throughput when memory headroom allows.
     """
 
     damping_cells: int = 40
@@ -185,6 +188,7 @@ class SolverConfig:
     trace_filter_zero_phase: bool = False
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1
+    grad_shot_batch_size: int = 1
 
 
 @dataclass(frozen=True)

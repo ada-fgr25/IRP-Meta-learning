@@ -45,6 +45,7 @@ class JaxBackend:
             auxs[0],
             auxs[1] if len(auxs) > 1 else None,
             auxs[2] if len(auxs) > 2 else None,
+            auxs[3] if len(auxs) > 3 else None,
         )
         return value.reshape((1,)), grad
 

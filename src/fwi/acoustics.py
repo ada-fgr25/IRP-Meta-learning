@@ -1040,18 +1040,20 @@ def _simulate_shot_forward_only(
     return traces
 
 
-def _normalise_forward_shot_batch_size(
+def _normalise_shot_batch_size(
     total_shots: int,
     shot_batch_size: int | None,
+    *,
+    argument_name: str,
 ) -> int:
-    """Resolve and validate forward-only shot batch size."""
+    """Resolve and validate a generic shot-batch-size argument."""
 
     if shot_batch_size is None:
         return 1
 
     batch_size = int(shot_batch_size)
     if batch_size <= 0:
-        raise ValueError("shot_batch_size must be a positive integer.")
+        raise ValueError(f"{argument_name} must be a positive integer.")
     return min(batch_size, max(total_shots, 1))
 
 
@@ -1147,7 +1149,11 @@ def simulate_survey_forward_only(
         acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
     )
     total_shots = int(active_shot_indices.shape[0])
-    batch_size = _normalise_forward_shot_batch_size(total_shots, shot_batch_size)
+    batch_size = _normalise_shot_batch_size(
+        total_shots,
+        shot_batch_size,
+        argument_name="shot_batch_size",
+    )
 
     if total_shots == 0:
         # Keep shape parity with the regular survey path even for an empty shot
@@ -1220,6 +1226,7 @@ def loss_and_grad(
     observed_data: jnp.ndarray,
     f_max_hz: float | None = None,
     shot_indices: jnp.ndarray | None = None,
+    shot_batch_size: int | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute the survey loss and explicit adjoint gradient in JAX.
 
@@ -1237,6 +1244,12 @@ def loss_and_grad(
     ) = acquisition.require_solver_arrays()
     active_shot_indices = (
         acquisition_shot_indices if shot_indices is None else shot_indices
+    )
+    total_shots = int(active_shot_indices.shape[0])
+    grad_batch_size = _normalise_shot_batch_size(
+        total_shots,
+        shot_batch_size,
+        argument_name="shot_batch_size",
     )
     padded_velocity = _pad_model_for_solver(velocity, config)
     padded_density = _pad_optional_field_for_solver(
@@ -1458,19 +1471,67 @@ def loss_and_grad(
         del cotangent_initial_prev, cotangent_initial_curr
         return shot_loss, shot_grad
 
-    # Accumulate shots sequentially rather than with `vmap`. This keeps only
-    # one shot's forward/adjoint history live at a time, which is much more
-    # memory-friendly on large benchmark-sized problems.
-    def accumulate_shot(carry, xs):
+    if total_shots == 0:
+        return jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity)
+
+    if grad_batch_size == 1:
+        # Sequential accumulation keeps only one shot's forward/adjoint history
+        # live at a time, which is the most memory-conservative mode.
+        def accumulate_shot(carry, xs):
+            total_loss, total_grad = carry
+            shot_index, observed_shot = xs
+            shot_loss, shot_grad = shot_loss_grad(shot_index, observed_shot)
+            return (total_loss + shot_loss, total_grad + shot_grad), None
+
+        init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
+        (total_loss, total_grad), _ = jax.lax.scan(
+            accumulate_shot,
+            init,
+            (active_shot_indices, observed_data),
+        )
+        return total_loss, total_grad
+
+    # Batched shot accumulation improves throughput by evaluating several
+    # independent shot forward+adjoint solves together, while masking the tail
+    # of the final partial batch so objective and gradient remain unchanged.
+    n_batches = (total_shots + grad_batch_size - 1) // grad_batch_size
+    padded_size = n_batches * grad_batch_size
+    pad = padded_size - total_shots
+
+    batched_shot_indices = jnp.pad(active_shot_indices, (0, pad)).reshape(
+        n_batches, grad_batch_size
+    )
+    batched_observed = jnp.pad(
+        observed_data,
+        ((0, pad), (0, 0), (0, 0)),
+    ).reshape(
+        n_batches,
+        grad_batch_size,
+        observed_data.shape[1],
+        observed_data.shape[2],
+    )
+    batched_active_mask = jnp.pad(
+        jnp.ones((total_shots,), dtype=jnp.bool_),
+        (0, pad),
+        constant_values=False,
+    ).reshape(n_batches, grad_batch_size)
+
+    def accumulate_shot_batch(carry, xs):
         total_loss, total_grad = carry
-        shot_index, observed_shot = xs
-        shot_loss, shot_grad = shot_loss_grad(shot_index, observed_shot)
-        return (total_loss + shot_loss, total_grad + shot_grad), None
+        shot_batch, observed_batch, active_mask = xs
+        batch_losses, batch_grads = jax.vmap(shot_loss_grad)(shot_batch, observed_batch)
+
+        active_loss = active_mask.astype(batch_losses.dtype)
+        active_grad = active_mask.astype(batch_grads.dtype)[:, None, None]
+        return (
+            total_loss + jnp.sum(batch_losses * active_loss),
+            total_grad + jnp.sum(batch_grads * active_grad, axis=0),
+        ), None
 
     init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
     (total_loss, total_grad), _ = jax.lax.scan(
-        accumulate_shot,
+        accumulate_shot_batch,
         init,
-        (active_shot_indices, observed_data),
+        (batched_shot_indices, batched_observed, batched_active_mask),
     )
     return total_loss, total_grad
