@@ -125,7 +125,7 @@ class SolverConfig:
     `damping_max_coefficient` can override that derived scale. If it is `None`,
     the coefficient is derived from absorbing width and spacing.
     `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
-    the maximum model velocity when deriving the damping field.
+    the local model velocity when deriving the damping field.
     `extra_cells_x` and `extra_cells_y` add a fixed halo around the inversion
     model before the damping frame is applied. This mirrors Stride's use of an
     extended solver domain, where the absorbing boundary sits outside the

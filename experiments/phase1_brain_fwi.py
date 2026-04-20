@@ -141,7 +141,7 @@ def parse_args():
         "--damping-velocity-scale",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Scale damping by maximum velocity as in Stride's damping helper.",
+        help="Scale damping by local velocity as in Stride's damping helper.",
     )
     parser.add_argument(
         "--stride-grad-processing",

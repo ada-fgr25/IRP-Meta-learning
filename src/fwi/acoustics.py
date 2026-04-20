@@ -321,7 +321,9 @@ def _build_stride_like_damping_sigma(
 
     sigma = coeff_x * px[:, None] + coeff_y * py[None, :]
     if config.solver.damping_velocity_scale:
-        sigma = sigma * jnp.max(velocity)
+        # Stride scales damping pointwise by local velocity when the damping
+        # field shape matches the velocity field shape (which is the case here).
+        sigma = sigma * velocity
 
     return sigma.astype(velocity.dtype)
 

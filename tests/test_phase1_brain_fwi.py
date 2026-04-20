@@ -577,6 +577,47 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(mask, 1.0)))
         self.assertTrue(bool(jnp.allclose(sponge_damp, 0.0)))
 
+    def test_sponge2_damping_uses_local_velocity_scaling(self):
+        """Sponge2 damping should scale pointwise with local velocity."""
+
+        base = _tiny_config()
+        scaled_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=4,
+                damping_velocity_scale=True,
+            ),
+        )
+        unscaled_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=4,
+                damping_velocity_scale=False,
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+        velocity = velocity.at[0, base.grid.ny // 2].set(3000.0)
+
+        _, damp_scaled = _build_boundary_terms(scaled_config, velocity)
+        _, damp_unscaled = _build_boundary_terms(unscaled_config, velocity)
+        edge_i = 0
+        edge_j = base.grid.ny // 2
+
+        self.assertGreater(float(damp_unscaled[edge_i, edge_j]), 0.0)
+        ratio = float(damp_scaled[edge_i, edge_j] / damp_unscaled[edge_i, edge_j])
+        self.assertTrue(bool(jnp.isfinite(ratio)))
+        self.assertAlmostEqual(ratio, 3000.0, delta=5.0)
+
     def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
         """The solver should run on a larger padded grid than the inversion model."""
 
