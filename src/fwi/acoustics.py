@@ -544,15 +544,7 @@ def _prepare_source_wavelet(
         if config.solver.diff_source
         else wavelet
     )
-    if not config.solver.source_window_enabled:
-        return prepared
-    return prepared * _stride_like_source_window(
-        prepared.shape[0],
-        config.solver.source_window_start,
-        config.solver.source_window_stop,
-        config.solver.source_window_alpha,
-        prepared.dtype,
-    )
+    return _apply_stride_like_time_window(prepared, config, axis=0)
 
 
 def _stride_like_tukey_window(
@@ -620,6 +612,35 @@ def _stride_like_source_window(
     leading_zeros = jnp.zeros((start_idx,), dtype=dtype)
     trailing_zeros = jnp.zeros((n_time - stop_idx,), dtype=dtype)
     return jnp.concatenate((leading_zeros, core, trailing_zeros))
+
+
+def _apply_stride_like_time_window(
+    values: jnp.ndarray,
+    config: BrainFWIConfig,
+    axis: int = 0,
+) -> jnp.ndarray:
+    """Apply the configured Stride-like Tukey time window to a tensor.
+
+    The same windowing pattern is used by Stride in forward source preparation
+    and when loading adjoint sources. Keeping one helper avoids drift between
+    those two paths in the JAX implementation.
+    """
+
+    if not config.solver.source_window_enabled:
+        return values
+
+    axis = int(axis)
+    n_time = values.shape[axis]
+    window = _stride_like_source_window(
+        n_time,
+        config.solver.source_window_start,
+        config.solver.source_window_stop,
+        config.solver.source_window_alpha,
+        values.dtype,
+    )
+    reshape = [1] * values.ndim
+    reshape[axis] = n_time
+    return values * window.reshape(reshape)
 
 
 def _source_scale(
@@ -1441,6 +1462,9 @@ def loss_and_grad(
             order=config.solver.trace_filter_order,
             zero_phase=config.solver.trace_filter_zero_phase,
             adjoint=not config.solver.trace_filter_zero_phase,
+        )
+        data_cotangents = _apply_stride_like_time_window(
+            data_cotangents, config, axis=0
         )
         padded_data_cotangents = _pad_traces_to_segments(
             data_cotangents,

@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from fwi.acoustics import (
+    _apply_stride_like_time_window,
     _build_boundary_terms,
     _prepare_source_wavelet,
     _source_scale,
@@ -275,6 +276,30 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(with_window[:4], 0.0)))
         self.assertTrue(bool(jnp.allclose(with_window[12:], 0.0)))
         self.assertGreater(float(jnp.sum(with_window[4:12])), 0.0)
+
+    def test_stride_like_time_window_applies_across_trace_axis(self):
+        """Configured source window should also apply to adjoint/source traces."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=True,
+                source_window_alpha=1.0e-3,
+                source_window_start=2,
+                source_window_stop=7,
+            ),
+        )
+        traces = jnp.ones((10, 3), dtype=jnp.float32)
+        windowed = _apply_stride_like_time_window(traces, config, axis=0)
+
+        self.assertTrue(bool(jnp.allclose(windowed[:2], 0.0)))
+        self.assertTrue(bool(jnp.allclose(windowed[7:], 0.0)))
+        self.assertGreater(float(jnp.sum(windowed[2:7])), 0.0)
 
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
