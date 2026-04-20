@@ -949,6 +949,112 @@ def _simulate_shot_with_checkpoints(
     return traces, checkpoint_prevs, checkpoint_currs, wavelet_segments, active_segments
 
 
+def _simulate_shot_forward_only(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    medium: AcousticMedium | None,
+    shot_index: jnp.ndarray,
+) -> jnp.ndarray:
+    """Run one shot without storing any checkpoint replay tensors.
+
+    This path is intended for forward-only use cases such as:
+    - metrics after optimisation
+    - diagnostic residual plots
+    - synthetic observation generation
+
+    It keeps only the current two wavefields plus the output traces, which is
+    materially cheaper than the checkpointed adjoint path for memory-heavy runs.
+    """
+
+    padded_velocity = _pad_model_for_solver(velocity, config)
+    padded_density = _pad_optional_field_for_solver(
+        None if medium is None else medium.density,
+        config,
+    )
+    padded_attenuation = _pad_optional_field_for_solver(
+        None if medium is None else medium.attenuation,
+        config,
+    )
+    (
+        solver_receivers,
+        solver_source_reference_gridpoints,
+        solver_source_coefficients,
+        solver_receiver_reference_gridpoints,
+        solver_receiver_coefficients,
+        wavelet,
+        use_hicks,
+    ) = _solver_acquisition_views(acquisition, config, padded_velocity.dtype)
+    source_index = solver_receivers[shot_index]
+    source_reference_gridpoint = solver_source_reference_gridpoints[shot_index]
+    source_coefficients = solver_source_coefficients[shot_index]
+    receiver_i = solver_receivers[:, 0]
+    receiver_j = solver_receivers[:, 1]
+    boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
+    source_wavelet = _prepare_source_wavelet(wavelet, config)
+
+    # Keep an explicit active mask so this scan remains robust even if future
+    # wavelet construction introduces padded/no-op samples.
+    active_mask = jnp.arange(source_wavelet.shape[0]) < wavelet.shape[0]
+
+    def step_forward_only(
+        carry: tuple[jnp.ndarray, jnp.ndarray],
+        xs: tuple[jnp.ndarray, jnp.ndarray],
+    ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+        """Advance one time step and record receiver samples."""
+
+        u_prev, u_curr = carry
+        source_value, active = xs
+        next_prev, u_next = _advance_state(
+            u_prev,
+            u_curr,
+            padded_velocity,
+            padded_density,
+            padded_attenuation,
+            source_index,
+            source_reference_gridpoint,
+            source_coefficients,
+            source_value,
+            active,
+            boundary_mask,
+            sponge_damp,
+            use_hicks,
+            config,
+        )
+        traces = jnp.where(
+            active,
+            _sample_receivers(
+                u_next,
+                receiver_i,
+                receiver_j,
+                solver_receiver_reference_gridpoints,
+                solver_receiver_coefficients,
+                use_hicks,
+            ),
+            0.0,
+        )
+        return (next_prev, u_next), traces
+
+    init = (jnp.zeros_like(padded_velocity), jnp.zeros_like(padded_velocity))
+    _, traces = jax.lax.scan(step_forward_only, init, (source_wavelet, active_mask))
+    return traces
+
+
+def _normalise_forward_shot_batch_size(
+    total_shots: int,
+    shot_batch_size: int | None,
+) -> int:
+    """Resolve and validate forward-only shot batch size."""
+
+    if shot_batch_size is None:
+        return 1
+
+    batch_size = int(shot_batch_size)
+    if batch_size <= 0:
+        raise ValueError("shot_batch_size must be a positive integer.")
+    return min(batch_size, max(total_shots, 1))
+
+
 def _replay_segment_history(
     start_carry: tuple[jnp.ndarray, jnp.ndarray],
     source_index: jnp.ndarray,
@@ -1019,6 +1125,70 @@ def simulate_shot(
         velocity, acquisition, config, medium, shot_index
     )
     return traces
+
+
+def simulate_survey_forward_only(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    medium: AcousticMedium | None = None,
+    shot_indices: jnp.ndarray | None = None,
+    shot_batch_size: int | None = None,
+) -> jnp.ndarray:
+    """Simulate a survey using the no-checkpoint forward-only path.
+
+    `shot_batch_size` controls how many shots are vmapped together in one
+    compile/execution unit. A value of `1` runs fully sequentially with the
+    lowest memory footprint; larger values can improve throughput when memory
+    headroom exists.
+    """
+
+    active_shot_indices = (
+        acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
+    )
+    total_shots = int(active_shot_indices.shape[0])
+    batch_size = _normalise_forward_shot_batch_size(total_shots, shot_batch_size)
+
+    if total_shots == 0:
+        # Keep shape parity with the regular survey path even for an empty shot
+        # selection.
+        return jnp.zeros(
+            (0, config.time.nt, acquisition.n_receivers),
+            dtype=velocity.dtype,
+        )
+
+    if batch_size == 1:
+        _, traces = jax.lax.scan(
+            lambda carry, shot_idx: (
+                carry,
+                _simulate_shot_forward_only(
+                    velocity,
+                    acquisition,
+                    config,
+                    medium,
+                    shot_idx,
+                ),
+            ),
+            None,
+            active_shot_indices,
+        )
+        return traces
+
+    batched_outputs = []
+    for start in range(0, total_shots, batch_size):
+        stop = min(start + batch_size, total_shots)
+        shot_batch = active_shot_indices[start:stop]
+        batch_traces = jax.vmap(
+            lambda shot_idx: _simulate_shot_forward_only(
+                velocity,
+                acquisition,
+                config,
+                medium,
+                shot_idx,
+            )
+        )(shot_batch)
+        batched_outputs.append(batch_traces)
+    return jnp.concatenate(batched_outputs, axis=0)
 
 
 def simulate_survey(

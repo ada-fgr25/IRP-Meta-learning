@@ -155,6 +155,9 @@ class SolverConfig:
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
+    `forward_shot_batch_size` controls shot-level batching for forward-only
+    surveys (for example diagnostics and final metrics). `1` is the most
+    memory-conservative setting; larger values trade memory for throughput.
     """
 
     damping_cells: int = 40
@@ -181,6 +184,7 @@ class SolverConfig:
     trace_filter_order: int = 1
     trace_filter_zero_phase: bool = False
     checkpoint_interval: int = 32
+    forward_shot_batch_size: int = 1
 
 
 @dataclass(frozen=True)

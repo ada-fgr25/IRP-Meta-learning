@@ -9,7 +9,7 @@ from .acquisition import (
     build_elliptical_acquisition,
     build_stride_acquisition,
 )
-from .acoustics import loss_and_grad, simulate_survey
+from .acoustics import loss_and_grad, simulate_survey_forward_only
 from .stride_benchmark import StrideBenchmarkRunner
 
 
@@ -25,12 +25,13 @@ class JaxBackend:
         return build_elliptical_acquisition(config)
 
     def forward(self, velocity, acquisition, config, medium=None, shot_indices=None):
-        return simulate_survey(
+        return simulate_survey_forward_only(
             velocity,
             acquisition,
             config,
             medium=medium,
             shot_indices=shot_indices,
+            shot_batch_size=config.solver.forward_shot_batch_size,
         )
 
     def loss_grad(self, params, x, auxs):
