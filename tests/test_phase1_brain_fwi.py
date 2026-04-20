@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from fwi.acoustics import (
     _build_boundary_terms,
     _source_scale,
+    loss_and_grad,
     simulate_survey,
     simulate_survey_forward_only,
 )
@@ -275,6 +276,35 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertTrue(
             bool(jnp.allclose(explicit_grad, autodiff_grad, rtol=5.0e-3, atol=5.0e-4))
+        )
+
+    def test_adjoint_shot_batching_matches_sequential_gradient(self):
+        """Shot-batched adjoint accumulation should preserve loss and gradient."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+
+        loss_seq, grad_seq = loss_and_grad(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            params["medium"],
+            params["y_obs"],
+            shot_batch_size=1,
+        )
+        loss_batch, grad_batch = loss_and_grad(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            params["medium"],
+            params["y_obs"],
+            shot_batch_size=2,
+        )
+
+        self.assertTrue(
+            bool(jnp.allclose(loss_batch, loss_seq, rtol=1.0e-6, atol=1.0e-8))
+        )
+        self.assertTrue(
+            bool(jnp.allclose(grad_batch, grad_seq, rtol=1.0e-5, atol=1.0e-6))
         )
 
     def test_explicit_adjoint_supports_higher_order_differentiation(self):
