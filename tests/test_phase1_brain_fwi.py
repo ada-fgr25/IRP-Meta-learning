@@ -557,6 +557,26 @@ class Phase1BrainFWITests(unittest.TestCase):
             bool(jnp.allclose(damp_auto, damp_explicit, rtol=1.0e-6, atol=1.0e-8))
         )
 
+    def test_sponge2_with_zero_absorbing_cells_yields_zero_damping(self):
+        """Sponge2 should reduce to zero boundary damping when width is zero."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=0,
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
+        self.assertTrue(bool(jnp.allclose(mask, 1.0)))
+        self.assertTrue(bool(jnp.allclose(sponge_damp, 0.0)))
+
     def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
         """The solver should run on a larger padded grid than the inversion model."""
 

@@ -742,19 +742,31 @@ def _propose_next_field(
 
     if config.solver.damping_mode == "sponge2":
         # Discrete analogue of Stride's second-order sponge damping term:
-        #   u_tt - L + 2*damp*u_t + damp^2*u = source
-        # with centred u_t approximation. Solving explicitly for u_{n+1} gives:
-        #   u_{n+1} = [2u_n - (1-d)u_{n-1} + dt^2*L(u_n) + src - d^2*u_n] / (1+d)
-        # where `d` is the pre-scaled damping coefficient field.
+        #   u_tt - L + vp^2 * (2*damp*u_t + damp^2*u) = source
+        # with centred u_t approximation. This mirrors Stride's Devito
+        # construction where `boundary_term` is multiplied by `vp^2` in the
+        # wave equation stencil before solving for `u_{n+1}`.
+        #
+        # With `u_t ≈ (u_{n+1}-u_{n-1})/(2*dt)`, we obtain:
+        #   u_{n+1} =
+        #     [2u_n - (1-s)u_{n-1} + dt^2*L(u_n) + src - q*u_n] / (1+s)
+        # where:
+        #   s = vp^2 * damp * dt
+        #   q = vp^2 * damp^2 * dt^2
+        # and `damp` is the pre-scaled SpongeBoundary2 field (`7*sigma*dt`).
+        sponge_linear = velocity_sq * sponge_damp * config.time.dt
+        sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
         numerator = (
             2.0 * u_curr
-            - (1.0 - sponge_damp - attenuation_implicit) * u_prev
+            - (1.0 - sponge_linear - attenuation_implicit) * u_prev
             + pressure_update
             + attenuation_update
             + source_update
-            - (sponge_damp**2) * u_curr
+            - sponge_quadratic * u_curr
         )
-        return boundary_mask * (numerator / (1.0 + sponge_damp + attenuation_implicit))
+        return boundary_mask * (
+            numerator / (1.0 + sponge_linear + attenuation_implicit)
+        )
 
     numerator = (
         2.0 * u_curr
