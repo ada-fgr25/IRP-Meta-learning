@@ -34,6 +34,7 @@ The current backend split is now:
 * The JAX boundary treatment now supports a Stride-inspired `sponge2` mode in addition to mask-based damping, and the solver runs on a padded domain so the absorber sits outside the physical model. This brings the update equation closer to Stride's second-order sponge formulation, but it is still an approximation rather than a full operator-level Devito boundary implementation.
 * The JAX spatial operator now defaults to `space_order=10` to match Stride's Devito discretisation much more closely.
 * The JAX solver now also supports fixed density/buoyancy and attenuation fields so the forward physics can include those terms even though the inversion still optimises velocity only.
+* The JAX solver now has a dedicated forward-only survey path that avoids adjoint checkpoint tensor allocation; forward-only calls can optionally batch shots in small vmapped chunks to tune throughput versus memory.
 * The remaining deliberate gaps are still important when interpreting results: the lack of a full complex-frequency-shift PML2 auxiliary-field system and the lack of direct buoyancy/attenuation parameter inversion still differ from the full Devito operator stack.
 
 ## Local Tracked Benchmark References

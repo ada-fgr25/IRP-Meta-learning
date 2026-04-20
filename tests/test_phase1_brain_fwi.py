@@ -10,7 +10,12 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from fwi.acoustics import _build_boundary_terms, _source_scale
+from fwi.acoustics import (
+    _build_boundary_terms,
+    _source_scale,
+    simulate_survey,
+    simulate_survey_forward_only,
+)
 from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
@@ -82,6 +87,66 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(params["acquisition"].n_shots, 3)
         self.assertEqual(params["acquisition"].n_receivers, 12)
         self.assertIn("medium", params)
+
+    def test_forward_only_survey_matches_checkpointed_forward(self):
+        """Forward-only mode should reproduce checkpointed forward traces."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        baseline = simulate_survey(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+        )
+        forward_only = simulate_survey_forward_only(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=1,
+        )
+
+        self.assertEqual(forward_only.shape, baseline.shape)
+        self.assertTrue(
+            bool(jnp.allclose(forward_only, baseline, rtol=1.0e-5, atol=1.0e-6))
+        )
+
+    def test_forward_only_shot_batching_is_numerically_stable(self):
+        """Shot batching should preserve forward-only survey results."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        sequential = simulate_survey_forward_only(
+            params["x_exact"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=1,
+        )
+        batched = simulate_survey_forward_only(
+            params["x_exact"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=2,
+        )
+
+        self.assertEqual(batched.shape, sequential.shape)
+        self.assertTrue(
+            bool(jnp.allclose(batched, sequential, rtol=1.0e-5, atol=1.0e-6))
+        )
+
+    def test_forward_only_rejects_non_positive_shot_batch_size(self):
+        """Forward-only survey batching should validate input arguments."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        with self.assertRaises(ValueError):
+            simulate_survey_forward_only(
+                params["x0"],
+                params["acquisition"],
+                params["config"],
+                medium=params["medium"],
+                shot_batch_size=0,
+            )
 
     def test_piecewise_medium_builder_returns_density_and_attenuation_fields(self):
         """Optional fixed medium fields should be constructible from velocity."""
