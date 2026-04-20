@@ -539,9 +539,87 @@ def _prepare_source_wavelet(
     - divide once more by `dt` when injecting the undifferentiated source
     """
 
-    if config.solver.diff_source:
-        return _time_derivative(wavelet, config.time.dt)
-    return wavelet
+    prepared = (
+        _time_derivative(wavelet, config.time.dt)
+        if config.solver.diff_source
+        else wavelet
+    )
+    if not config.solver.source_window_enabled:
+        return prepared
+    return prepared * _stride_like_source_window(
+        prepared.shape[0],
+        config.solver.source_window_start,
+        config.solver.source_window_stop,
+        config.solver.source_window_alpha,
+        prepared.dtype,
+    )
+
+
+def _stride_like_tukey_window(
+    length: int,
+    alpha: float,
+    dtype,
+) -> jnp.ndarray:
+    """Return a symmetric Tukey window matching Stride/Scipy behavior.
+
+    Stride uses `scipy.signal.get_window(('tukey', alpha), length, False)`.
+    We implement the same periodic=False variant in pure JAX so source
+    preprocessing stays differentiable/JIT-compatible.
+    """
+
+    window_length = max(int(length), 0)
+    if window_length <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+    if window_length == 1:
+        return jnp.ones((1,), dtype=dtype)
+
+    alpha = float(alpha)
+    if alpha <= 0.0:
+        return jnp.ones((window_length,), dtype=dtype)
+    if alpha >= 1.0:
+        n = jnp.arange(window_length, dtype=dtype)
+        return 0.5 - 0.5 * jnp.cos(2.0 * jnp.pi * n / (window_length - 1))
+
+    n = jnp.arange(window_length, dtype=dtype)
+    x = n / (window_length - 1)
+    alpha_half = alpha / 2.0
+
+    left = 0.5 * (1.0 + jnp.cos(jnp.pi * ((2.0 * x / alpha) - 1.0)))
+    middle = jnp.ones_like(x)
+    right = 0.5 * (1.0 + jnp.cos(jnp.pi * ((2.0 * x / alpha) - (2.0 / alpha) + 1.0)))
+
+    return jnp.where(
+        x < alpha_half, left, jnp.where(x <= 1.0 - alpha_half, middle, right)
+    )
+
+
+def _stride_like_source_window(
+    n_time: int,
+    start: int,
+    stop: int | None,
+    alpha: float,
+    dtype,
+) -> jnp.ndarray:
+    """Return Stride-like time-bounded Tukey source window.
+
+    This mirrors Stride's `time_bounds` source preparation:
+    - build a Tukey window over `[start:stop]`
+    - pad zeros outside that interval
+    """
+
+    n_time = max(int(n_time), 0)
+    if n_time <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    start_idx = max(int(start), 0)
+    stop_idx = n_time if stop is None else min(max(int(stop), 0), n_time)
+    if stop_idx <= start_idx:
+        return jnp.zeros((n_time,), dtype=dtype)
+
+    core = _stride_like_tukey_window(stop_idx - start_idx, alpha, dtype)
+    leading_zeros = jnp.zeros((start_idx,), dtype=dtype)
+    trailing_zeros = jnp.zeros((n_time - stop_idx,), dtype=dtype)
+    return jnp.concatenate((leading_zeros, core, trailing_zeros))
 
 
 def _source_scale(

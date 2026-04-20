@@ -142,6 +142,10 @@ class SolverConfig:
     `IsoAcousticDevito` scaling `2 * dt**2 * vp / max(dx, dy)` and, unless
     `diff_source` is enabled, divides once more by `dt` exactly as the Devito
     implementation does.
+    `source_window_enabled` applies a Stride-like Tukey source window before
+    injection. `source_window_alpha` is the Tukey taper parameter used by
+    Stride. `source_window_start` and `source_window_stop` mirror Stride's
+    `time_bounds` behavior by defining the active source interval.
     `diff_source` mirrors Stride's optional behaviour of injecting the first
     time derivative of the source wavelet instead of the raw wavelet.
     `stride_grad_processing` toggles a JAX approximation of Stride's default
@@ -177,6 +181,10 @@ class SolverConfig:
     space_order: int = 10
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
+    source_window_enabled: bool = True
+    source_window_alpha: float = 1.0e-3
+    source_window_start: int = 0
+    source_window_stop: int | None = None
     diff_source: bool = False
     stride_grad_processing: bool = True
     mask_grad: bool = True

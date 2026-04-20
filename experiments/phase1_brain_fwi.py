@@ -99,6 +99,30 @@ def parse_args():
         help="Number of time steps to replay per adjoint checkpoint segment.",
     )
     parser.add_argument(
+        "--source-window-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like Tukey source windowing before injection.",
+    )
+    parser.add_argument(
+        "--source-window-alpha",
+        type=float,
+        default=1.0e-3,
+        help="Tukey alpha for source windowing when enabled.",
+    )
+    parser.add_argument(
+        "--source-window-start",
+        type=int,
+        default=0,
+        help="Inclusive source-window start sample.",
+    )
+    parser.add_argument(
+        "--source-window-stop",
+        type=int,
+        default=None,
+        help="Exclusive source-window stop sample (default: nt).",
+    )
+    parser.add_argument(
         "--damping-mode",
         choices=["legacy", "stride_like", "sponge2"],
         default="stride_like",
@@ -285,6 +309,10 @@ def build_config(args) -> BrainFWIConfig:
             checkpoint_interval=args.checkpoint_interval,
             forward_shot_batch_size=args.forward_shot_batch_size,
             grad_shot_batch_size=args.grad_shot_batch_size,
+            source_window_enabled=args.source_window_enabled,
+            source_window_alpha=args.source_window_alpha,
+            source_window_start=args.source_window_start,
+            source_window_stop=args.source_window_stop,
             damping_mode=args.damping_mode,
             damping_type=args.damping_type,
             damping_cells=args.damping_cells,
@@ -994,6 +1022,10 @@ def main():
         metrics["extra_cells_x"] = config.solver.extra_cells_x
         metrics["extra_cells_y"] = config.solver.extra_cells_y
         metrics["space_order"] = config.solver.space_order
+        metrics["source_window_enabled"] = config.solver.source_window_enabled
+        metrics["source_window_alpha"] = config.solver.source_window_alpha
+        metrics["source_window_start"] = config.solver.source_window_start
+        metrics["source_window_stop"] = config.solver.source_window_stop
         metrics["trace_filter_type"] = config.solver.trace_filter_type
         metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
         metrics["trace_filter_order"] = config.solver.trace_filter_order
@@ -1112,6 +1144,13 @@ def main():
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
         print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
         print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
+        print(
+            "Source window (enabled/alpha/start/stop): "
+            f"{config.solver.source_window_enabled}/"
+            f"{config.solver.source_window_alpha}/"
+            f"{config.solver.source_window_start}/"
+            f"{config.solver.source_window_stop}"
+        )
         print(
             "Boundary damping mode/type/cells: "
             f"{config.solver.damping_mode}/"
