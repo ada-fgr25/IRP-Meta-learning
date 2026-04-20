@@ -167,6 +167,30 @@ def _calculate_hicks(
     return reference_gridpoints, coefficients
 
 
+def _grid_to_physical_coordinates(
+    grid_coordinates: jnp.ndarray,
+    *,
+    spacing: tuple[float, float],
+    origin: tuple[float, float],
+) -> np.ndarray:
+    """Convert grid-index coordinates into physical coordinates.
+
+    `build_elliptical_acquisition` parameterises transducer positions in grid
+    index units because that is convenient for plotting and nearest-index
+    interpolation. The Hicks helper, however, expects physical coordinates and
+    internally maps them back to grid coordinates via `(x - origin) / spacing`.
+
+    If we pass index-space values directly into Hicks while still supplying
+    metric spacing, we effectively divide by spacing twice and produce extremely
+    large reference indices. Converting to physical coordinates here keeps the
+    two coordinate systems consistent.
+    """
+
+    spacing_array = np.asarray(spacing, dtype=np.float32)
+    origin_array = np.asarray(origin, dtype=np.float32)
+    return np.asarray(grid_coordinates, dtype=np.float32) * spacing_array + origin_array
+
+
 def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
     """Create the Stride-inspired elliptical ring used by the JAX solver."""
 
@@ -199,9 +223,13 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
         # Keep the reference implementation's assumptions:
         # - physical origin at (0, 0)
         # - same coordinates used for sources and receivers
-        coordinates_np = np.asarray(coords, dtype=np.float32)
         spacing = (float(grid.dx), float(grid.dy))
         origin = (0.0, 0.0)
+        coordinates_np = _grid_to_physical_coordinates(
+            coords,
+            spacing=spacing,
+            origin=origin,
+        )
 
         src_ref, src_coeff = _calculate_hicks(
             coordinates_np,
