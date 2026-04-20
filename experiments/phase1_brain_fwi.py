@@ -24,7 +24,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
-from fwi.acoustics import simulate_survey
+from fwi.acoustics import simulate_survey_forward_only
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
@@ -178,6 +178,15 @@ def parse_args():
     )
     parser.add_argument("--shots-per-iter", type=int, default=32)
     parser.add_argument(
+        "--forward-shot-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Shot mini-batch size for forward-only surveys used by diagnostics "
+            "and final metrics."
+        ),
+    )
+    parser.add_argument(
         "--final-shots",
         type=int,
         default=None,
@@ -262,6 +271,7 @@ def build_config(args) -> BrainFWIConfig:
         ),
         solver=SolverConfig(
             checkpoint_interval=args.checkpoint_interval,
+            forward_shot_batch_size=args.forward_shot_batch_size,
             damping_mode=args.damping_mode,
             damping_type=args.damping_type,
             damping_cells=args.damping_cells,
@@ -445,12 +455,13 @@ def _save_iteration_diagnostics(
             flush=True,
         )
     survey_start = perf_counter()
-    modelled_batch = simulate_survey(
+    modelled_batch = simulate_survey_forward_only(
         model,
         acquisition,
         config,
         medium=medium,
         shot_indices=active_shot_indices,
+        shot_batch_size=config.solver.forward_shot_batch_size,
     )
     modelled_batch = _wait_for_jax_result(modelled_batch)
     survey_elapsed = perf_counter() - survey_start
@@ -951,6 +962,7 @@ def main():
         metrics["final_shots"] = args.final_shots
         metrics["seed"] = args.seed
         metrics["checkpoint_interval"] = config.solver.checkpoint_interval
+        metrics["forward_shot_batch_size"] = config.solver.forward_shot_batch_size
         metrics["damping_mode"] = config.solver.damping_mode
         metrics["damping_type"] = config.solver.damping_type
         metrics["damping_cells"] = config.solver.damping_cells
@@ -1047,12 +1059,13 @@ def main():
         )
 
         final_survey_start = perf_counter()
-        y_hat = simulate_survey(
+        y_hat = simulate_survey_forward_only(
             x_hat,
             params["acquisition"],
             config,
             medium=params["medium"],
             shot_indices=final_metric_shot_indices,
+            shot_batch_size=config.solver.forward_shot_batch_size,
         )
         y_hat = _wait_for_jax_result(y_hat)
         final_survey_elapsed = perf_counter() - final_survey_start
@@ -1078,6 +1091,7 @@ def main():
         print(f"Max frequencies (Hz): {max_freqs_hz}")
         print(f"Random shots per iteration: {args.shots_per_iter}")
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
+        print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
         print(
             "Boundary damping mode/type/cells: "
             f"{config.solver.damping_mode}/"
