@@ -187,6 +187,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--grad-shot-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Shot mini-batch size for forward+adjoint gradient accumulation. "
+            "Use 1 for the most conservative memory mode."
+        ),
+    )
+    parser.add_argument(
         "--final-shots",
         type=int,
         default=None,
@@ -272,6 +281,7 @@ def build_config(args) -> BrainFWIConfig:
         solver=SolverConfig(
             checkpoint_interval=args.checkpoint_interval,
             forward_shot_batch_size=args.forward_shot_batch_size,
+            grad_shot_batch_size=args.grad_shot_batch_size,
             damping_mode=args.damping_mode,
             damping_type=args.damping_type,
             damping_cells=args.damping_cells,
@@ -745,7 +755,12 @@ def main():
             lambda model, observed_batch, active_shot_indices, fmax_hz: dldx(
                 params,
                 model,
-                (observed_batch, fmax_hz, active_shot_indices),
+                (
+                    observed_batch,
+                    fmax_hz,
+                    active_shot_indices,
+                    config.solver.grad_shot_batch_size,
+                ),
             ),
             static_argnames=("fmax_hz",),
         )
@@ -753,7 +768,7 @@ def main():
             lambda model, fmax_hz: dldx(
                 params,
                 model,
-                (auxs[0], fmax_hz),
+                (auxs[0], fmax_hz, None, config.solver.grad_shot_batch_size),
             ),
             static_argnames=("fmax_hz",),
         )
@@ -963,6 +978,7 @@ def main():
         metrics["seed"] = args.seed
         metrics["checkpoint_interval"] = config.solver.checkpoint_interval
         metrics["forward_shot_batch_size"] = config.solver.forward_shot_batch_size
+        metrics["grad_shot_batch_size"] = config.solver.grad_shot_batch_size
         metrics["damping_mode"] = config.solver.damping_mode
         metrics["damping_type"] = config.solver.damping_type
         metrics["damping_cells"] = config.solver.damping_cells
@@ -1092,6 +1108,7 @@ def main():
         print(f"Random shots per iteration: {args.shots_per_iter}")
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
         print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
+        print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
         print(
             "Boundary damping mode/type/cells: "
             f"{config.solver.damping_mode}/"
