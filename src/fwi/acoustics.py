@@ -1272,7 +1272,6 @@ def loss_and_grad(
     receiver_i = solver_receivers[:, 0]
     receiver_j = solver_receivers[:, 1]
     boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
-    grid_shape = padded_velocity.shape
 
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
@@ -1327,126 +1326,117 @@ def loss_and_grad(
             wavelet_segments.shape[1],
         )
 
-        def reverse_step(carry, xs):
-            """Reverse one time step of the discrete wave equation."""
+        def segment_transition(
+            segment_start_prev: jnp.ndarray,
+            segment_start_curr: jnp.ndarray,
+            segment_velocity: jnp.ndarray,
+            source_block: jnp.ndarray,
+            active_block: jnp.ndarray,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            """Advance one full checkpoint segment and return segment outputs.
 
-            cotangent_next_prev, cotangent_next_curr, grad_velocity = carry
-            prev_field, curr_field, data_cotangent, active, source_block_value = xs
+            This fuses the reverse-time sensitivity into one VJP call per
+            segment instead of one VJP per time step. The discrete forward
+            logic is identical to `_step_shot_state`, so gradients remain
+            aligned with the exact solver update while reducing adjoint overhead.
+            """
 
-            def active_reverse(state):
-                active_cotangent_next_prev, active_cotangent_next_curr, active_grad = (
-                    state
+            padded_segment_velocity = _pad_model_for_solver(segment_velocity, config)
+
+            def segment_step(
+                carry: tuple[jnp.ndarray, jnp.ndarray],
+                step_xs: tuple[jnp.ndarray, jnp.ndarray],
+            ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+                source_value, active = step_xs
+                next_prev, next_curr = _advance_state(
+                    carry[0],
+                    carry[1],
+                    padded_segment_velocity,
+                    padded_density,
+                    padded_attenuation,
+                    source_index,
+                    source_reference_gridpoint,
+                    source_coefficients,
+                    source_value,
+                    active,
+                    boundary_mask,
+                    sponge_damp,
+                    use_hicks,
+                    config,
                 )
-
-                # The observation operator samples the next wavefield at receiver
-                # points, so its adjoint adds the trace-domain cotangents to the
-                # second component of the output state `(u_n, u_{n+1})`.
-                active_cotangent_next_curr = (
-                    active_cotangent_next_curr
-                    + _inject_receivers(
+                traces = jnp.where(
+                    active,
+                    _sample_receivers(
+                        next_curr,
                         receiver_i,
                         receiver_j,
                         solver_receiver_reference_gridpoints,
                         solver_receiver_coefficients,
-                        data_cotangent,
-                        grid_shape,
                         use_hicks,
-                    )
+                    ),
+                    0.0,
                 )
+                return (next_prev, next_curr), traces
 
-                # The state transition is treated as a pure function, so we can
-                # reuse JAX's exact linearisation of the discrete forward model.
-                # This keeps the explicit adjoint in lockstep with the solver even
-                # as we change kernels or source scaling details.
-                def state_transition(
-                    step_prev: jnp.ndarray,
-                    step_curr: jnp.ndarray,
-                    step_velocity: jnp.ndarray,
-                ) -> tuple[jnp.ndarray, jnp.ndarray]:
-                    padded_step_velocity = _pad_model_for_solver(step_velocity, config)
-                    return (
-                        step_curr,
-                        _propose_next_field(
-                            step_prev,
-                            step_curr,
-                            padded_step_velocity,
-                            padded_density,
-                            padded_attenuation,
-                            source_index,
-                            source_reference_gridpoint,
-                            source_coefficients,
-                            source_block_value,
-                            boundary_mask,
-                            sponge_damp,
-                            use_hicks,
-                            config,
-                        ),
-                    )
-
-                (_, _), state_vjp = jax.vjp(
-                    state_transition,
-                    prev_field,
-                    curr_field,
-                    velocity,
-                )
-                cotangent_prev, cotangent_curr, velocity_cotangent = state_vjp(
-                    (active_cotangent_next_prev, active_cotangent_next_curr)
-                )
-                return (
-                    cotangent_prev,
-                    cotangent_curr,
-                    active_grad + velocity_cotangent,
-                )
-
-            return (
-                jax.lax.cond(
-                    active,
-                    active_reverse,
-                    lambda state: state,
-                    carry,
-                ),
-                None,
+            (
+                segment_end_prev,
+                segment_end_curr,
+            ), segment_traces = jax.lax.scan(
+                segment_step,
+                (segment_start_prev, segment_start_curr),
+                (source_block, active_block),
             )
+            return segment_end_prev, segment_end_curr, segment_traces
 
         def reverse_segment(carry, xs):
-            """Replay one segment then sweep its steps in reverse."""
+            """Run one fused segment-level VJP for reverse propagation."""
 
+            cotangent_end_prev, cotangent_end_curr, grad_velocity = carry
             checkpoint_prev, checkpoint_curr, source_block, active_block, data_block = (
                 xs
             )
-            prev_fields, curr_fields = _replay_segment_history(
-                (checkpoint_prev, checkpoint_curr),
-                source_index,
-                source_reference_gridpoint,
-                source_coefficients,
-                receiver_i,
-                receiver_j,
-                solver_receiver_reference_gridpoints,
-                solver_receiver_coefficients,
-                padded_velocity,
-                padded_density,
-                padded_attenuation,
-                boundary_mask,
-                sponge_damp,
-                use_hicks,
-                config,
-                source_block,
-                active_block,
-            )
 
-            carry, _ = jax.lax.scan(
-                reverse_step,
-                carry,
-                (
-                    prev_fields,
-                    curr_fields,
-                    data_block,
-                    active_block,
+            # Inactive padded samples are no-ops in the forward segment scan.
+            # Zeroing their cotangents keeps the transposed trace injection
+            # exactly aligned with that behaviour.
+            active_trace_mask = active_block[:, None].astype(data_block.dtype)
+            segment_data_cotangent = data_block * active_trace_mask
+
+            (
+                _segment_end_prev,
+                _segment_end_curr,
+                _segment_traces,
+            ), segment_vjp = jax.vjp(
+                lambda step_prev, step_curr, step_velocity: segment_transition(
+                    step_prev,
+                    step_curr,
+                    step_velocity,
                     source_block,
+                    active_block,
                 ),
-                reverse=True,
+                checkpoint_prev,
+                checkpoint_curr,
+                velocity,
             )
-            return carry, None
+            (
+                cotangent_start_prev,
+                cotangent_start_curr,
+                velocity_cotangent,
+            ) = segment_vjp(
+                (
+                    cotangent_end_prev,
+                    cotangent_end_curr,
+                    segment_data_cotangent,
+                )
+            )
+            return (
+                (
+                    cotangent_start_prev,
+                    cotangent_start_curr,
+                    grad_velocity + velocity_cotangent,
+                ),
+                None,
+            )
 
         init_carry = (
             jnp.zeros_like(padded_velocity),
