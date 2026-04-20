@@ -626,22 +626,35 @@ def _attenuation_update(
     velocity: jnp.ndarray,
     attenuation: jnp.ndarray | None,
     config: BrainFWIConfig,
-) -> jnp.ndarray:
-    """Return the explicit attenuation contribution for one time step.
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return attenuation contributions for one time step.
 
     Stride supports attenuation powers `0` and `2`. We mirror those options in
-    the JAX update while keeping the fields fixed. The returned tensor is the
-    additive contribution that should be combined with the usual pressure and
-    source updates.
+    the JAX update while keeping the fields fixed.
+
+    Returns:
+    - explicit_update: additive right-hand-side contribution
+    - implicit_factor: coefficient for a Devito-like centred `u_t` term
+      affecting `u_{n+1}` and `u_{n-1}` (used for power `0`)
     """
 
     if attenuation is None:
-        return jnp.zeros_like(u_curr)
+        zeros = jnp.zeros_like(u_curr)
+        return zeros, zeros
 
     power = int(config.model.attenuation_power)
+    # Stride converts alpha from dB/cm into Nepers before applying the
+    # attenuation stencil. We mirror that conversion to keep attenuation scales
+    # consistent with the Devito operator path.
+    db_to_neper = (
+        100.0 * (1.0e-6 / (2.0 * jnp.pi)) ** power / (20.0 * jnp.log10(jnp.exp(1.0)))
+    )
+    alpha_neper = attenuation * db_to_neper
+
     if power == 0:
-        quantity_prev = u_prev
-        quantity_curr = u_curr
+        coeff = 2.0 * alpha_neper * velocity
+        implicit_factor = 0.5 * config.time.dt * coeff
+        return jnp.zeros_like(u_curr), implicit_factor
     elif power == 2:
         quantity_prev = -_laplacian(
             u_prev,
@@ -658,8 +671,9 @@ def _attenuation_update(
     else:
         raise ValueError(f"Unsupported attenuation_power '{power}'. Use 0 or 2.")
 
-    coeff = 2.0 * attenuation * (velocity ** (power + 1))
-    return -config.time.dt * coeff * (quantity_curr - quantity_prev)
+    coeff = 2.0 * alpha_neper * (velocity ** (power + 1))
+    explicit_update = -config.time.dt * coeff * (quantity_curr - quantity_prev)
+    return explicit_update, jnp.zeros_like(u_curr)
 
 
 def _propose_next_field(
@@ -689,7 +703,7 @@ def _propose_next_field(
     pressure_update = (config.time.dt**2) * _spatial_operator(
         u_curr, velocity_sq, density, config
     )
-    attenuation_update = _attenuation_update(
+    attenuation_update, attenuation_implicit = _attenuation_update(
         u_prev,
         u_curr,
         velocity,
@@ -723,17 +737,22 @@ def _propose_next_field(
         # where `d` is the pre-scaled damping coefficient field.
         numerator = (
             2.0 * u_curr
-            - (1.0 - sponge_damp) * u_prev
+            - (1.0 - sponge_damp - attenuation_implicit) * u_prev
             + pressure_update
             + attenuation_update
             + source_update
             - (sponge_damp**2) * u_curr
         )
-        return boundary_mask * (numerator / (1.0 + sponge_damp))
+        return boundary_mask * (numerator / (1.0 + sponge_damp + attenuation_implicit))
 
-    return boundary_mask * (
-        2.0 * u_curr - u_prev + pressure_update + attenuation_update + source_update
+    numerator = (
+        2.0 * u_curr
+        - (1.0 - attenuation_implicit) * u_prev
+        + pressure_update
+        + attenuation_update
+        + source_update
     )
+    return boundary_mask * (numerator / (1.0 + attenuation_implicit))
 
 
 def _advance_state(
