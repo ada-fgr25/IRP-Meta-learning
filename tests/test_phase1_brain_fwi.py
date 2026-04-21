@@ -221,6 +221,50 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertLess(int(jnp.max(rec_refs[:, 0])), hicks_config.grid.nx)
         self.assertLess(int(jnp.max(rec_refs[:, 1])), hicks_config.grid.ny)
 
+    def test_hicks_coordinate_epsilon_changes_reference_gridpoints(self):
+        """Stride-like coordinate epsilon should affect Hicks reference points."""
+
+        base = _tiny_config()
+        # Use an exaggerated epsilon scale so this regression test is robust:
+        # if epsilon handling is removed, the references collapse back to the
+        # zero-epsilon case and this test catches the parity drift immediately.
+        epsilon_on = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(
+                base.acquisition,
+                interpolation_type="hicks",
+                apply_coordinate_epsilon=True,
+                coordinate_epsilon_scale=0.5,
+            ),
+            model=base.model,
+            solver=base.solver,
+        )
+        epsilon_off = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(
+                base.acquisition,
+                interpolation_type="hicks",
+                apply_coordinate_epsilon=False,
+                coordinate_epsilon_scale=0.5,
+            ),
+            model=base.model,
+            solver=base.solver,
+        )
+
+        refs_on = init_params(jax.random.PRNGKey(0), config=epsilon_on)["acquisition"]
+        refs_off = init_params(jax.random.PRNGKey(0), config=epsilon_off)["acquisition"]
+
+        self.assertFalse(
+            bool(
+                jnp.allclose(
+                    refs_on.source_reference_gridpoints,
+                    refs_off.source_reference_gridpoints,
+                )
+            )
+        )
+
     def test_stride_like_source_window_respects_time_bounds(self):
         """Source window should be non-zero only inside requested bounds."""
 

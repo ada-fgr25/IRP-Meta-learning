@@ -52,6 +52,11 @@ class AcquisitionConfig:
     `interpolation_type` mirrors Stride's receiver/source interpolation switch:
     - `linear`: simple gridpoint interpolation baseline
     - `hicks`: sinc/Kaiser-style precomputed interpolation coefficients
+    `coordinate_epsilon_scale` mirrors Stride's small coordinate perturbation
+    before sparse-function setup. The offset is applied as
+    `coordinate_epsilon_scale * spacing` per spatial dimension in physical
+    coordinates and helps avoid edge-aligned interpolation degeneracies.
+    `apply_coordinate_epsilon` keeps this behaviour configurable for ablations.
     """
 
     n_transducers: int = 256
@@ -62,6 +67,8 @@ class AcquisitionConfig:
     source_cycles: int = 3
     source_amplitude: float = 1.0
     interpolation_type: str = "linear"
+    coordinate_epsilon_scale: float = 1.0e-3
+    apply_coordinate_epsilon: bool = True
 
 
 @dataclass(frozen=True)
