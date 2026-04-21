@@ -546,22 +546,27 @@ def _stride_like_shift_traces(
     if not config.solver.fw3d_mode or f_max_hz is None:
         return traces
 
-    safe_relaxation = max(float(config.solver.trace_filter_relaxation), 1.0e-6)
-    f_max_dimless = float(f_max_hz) * float(config.time.dt) / safe_relaxation
-    if f_max_dimless <= 0.0:
-        return traces
-
-    period = int(jnp.round(1.0 / f_max_dimless))
-    shift = period // 4
-    if shift <= 0:
-        return traces
-
     moved = jnp.moveaxis(traces, axis, -1)
-    n_time = moved.shape[-1]
-    if shift >= n_time:
-        return traces
+    n_time = int(moved.shape[-1])
+    safe_relaxation = max(float(config.solver.trace_filter_relaxation), 1.0e-6)
+    f_max_dimless = (
+        jnp.asarray(f_max_hz, dtype=moved.dtype)
+        * float(config.time.dt)
+        / safe_relaxation
+    )
 
-    shifted = moved.at[..., : n_time - shift].set(moved[..., shift:])
+    # Keep this computation JAX-trace-safe: no Python int casts from traced
+    # values. This avoids concretization failures inside `lax.scan`/`jit`.
+    positive_fmax = f_max_dimless > 0.0
+    reciprocal = jnp.where(positive_fmax, 1.0 / f_max_dimless, 0.0)
+    period = jnp.rint(reciprocal).astype(jnp.int32)
+    shift = jnp.where(positive_fmax, period // 4, 0)
+
+    time_indices = jnp.arange(n_time, dtype=jnp.int32)
+    src_indices = jnp.where(
+        time_indices < (n_time - shift), time_indices + shift, time_indices
+    )
+    shifted = jnp.take(moved, src_indices, axis=-1)
     return jnp.moveaxis(shifted, -1, axis)
 
 
