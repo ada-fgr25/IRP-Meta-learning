@@ -15,11 +15,14 @@ from fwi.acoustics import (
     _build_boundary_terms,
     _prepare_source_wavelet,
     _source_scale,
+    _stride_like_shift_traces,
     _stride_like_source_window,
     loss_and_grad,
+    shot_loss_from_traces,
     simulate_survey,
     simulate_survey_forward_only,
 )
+from fwi.filtering import bandlimit_traces
 from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
@@ -320,6 +323,71 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(with_window[:4], 0.0)))
         self.assertTrue(bool(jnp.allclose(with_window[12:], 0.0)))
         self.assertGreater(float(jnp.sum(with_window[4:12])), 0.0)
+
+    def test_prepare_source_wavelet_applies_stride_like_fw3d_shift(self):
+        """FW3D mode should apply Stride's quarter-period wavelet shift."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=False,
+                stride_trace_processing=True,
+                fw3d_mode=True,
+                trace_filter_relaxation=0.75,
+            ),
+        )
+        wavelet = jnp.arange(base.time.nt, dtype=jnp.float32)
+        shifted = _prepare_source_wavelet(wavelet, config, f_max_hz=1.0e6)
+
+        filtered = bandlimit_traces(
+            wavelet,
+            config.time.dt,
+            1.0e6,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+        )
+        expected = _stride_like_shift_traces(filtered, config, 1.0e6, axis=0)
+        self.assertTrue(bool(jnp.allclose(shifted, expected)))
+
+    def test_shot_loss_trace_processing_path_is_differentiable(self):
+        """Stride-like trace conditioning should keep shot loss differentiable."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                source_window_enabled=False,
+            ),
+        )
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+        observed = observed.at[:, : base.acquisition.n_transducers // 2].set(1.0)
+
+        loss_value = shot_loss_from_traces(modelled, observed, config, f_max_hz=2.0e5)
+        grad = jax.grad(
+            lambda traces: shot_loss_from_traces(
+                traces, observed, config, f_max_hz=2.0e5
+            )
+        )(modelled)
+
+        self.assertGreater(float(loss_value), 0.0)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+        self.assertEqual(grad.shape, modelled.shape)
 
     def test_stride_like_time_window_applies_across_trace_axis(self):
         """Configured source window should also apply to adjoint/source traces."""

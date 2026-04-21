@@ -13,9 +13,9 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 
+from .acoustics import shot_loss_from_traces
 from .backends import build_backend
 from .config import BrainFWIConfig
-from .filtering import bandlimit_traces
 from .medium import AcousticMedium, build_acoustic_medium
 from .phantoms import build_initial_velocity, build_true_brain_velocity
 
@@ -199,17 +199,15 @@ def loss(params, x, auxs):
     f_max_hz = auxs[1] if len(auxs) > 1 else None
     shot_indices = auxs[2] if len(auxs) > 2 else None
     y = forward(params, x, shot_indices=shot_indices)
-    residual = y - y_obs
-    residual = bandlimit_traces(
-        residual,
-        params["config"].time.dt,
-        f_max_hz,
-        filter_type=params["config"].solver.trace_filter_type,
-        relaxation=params["config"].solver.trace_filter_relaxation,
-        order=params["config"].solver.trace_filter_order,
-        zero_phase=params["config"].solver.trace_filter_zero_phase,
-    )
-    return (0.5 * jnp.sum(residual**2)).reshape((1,))
+    per_shot_losses = jax.vmap(
+        lambda modelled_shot, observed_shot: shot_loss_from_traces(
+            modelled_shot,
+            observed_shot,
+            params["config"],
+            f_max_hz,
+        )
+    )(y, y_obs)
+    return jnp.sum(per_shot_losses).reshape((1,))
 
 
 def smooth_traces(traces: jnp.ndarray, radius: int) -> jnp.ndarray:

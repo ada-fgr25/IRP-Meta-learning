@@ -164,6 +164,12 @@ class SolverConfig:
     `trace_filter_zero_phase` control the trace-domain `f_max` continuation
     filter. The defaults mirror Stride's low-pass continuation path more
     closely by using the cosine filter family with relaxation `0.75`.
+    `fw3d_mode` toggles Stride's quarter-period trace shift used in the
+    benchmark scripts. `stride_trace_processing` enables a Stride-like
+    pre-misfit trace-conditioning path (`ProcessObserved` + `ProcessTraces`)
+    inside the JAX loss, including mute/filter/norm parity while staying fully
+    differentiable. `stride_trace_scale_per_shot` mirrors Stride's optional
+    `scale_per_shot` step (disabled by default, as in the benchmark script).
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -202,6 +208,9 @@ class SolverConfig:
     trace_filter_relaxation: float = 0.75
     trace_filter_order: int = 1
     trace_filter_zero_phase: bool = False
+    fw3d_mode: bool = True
+    stride_trace_processing: bool = True
+    stride_trace_scale_per_shot: bool = False
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1
     grad_shot_batch_size: int = 1
