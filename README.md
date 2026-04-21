@@ -149,9 +149,12 @@ Useful options include:
 * `--shots-per-iter` and `--seed` to control the random shot subsets
 * `--final-shots N` to evaluate final data-domain metrics on a deterministic shot subset instead of all shots
 * `--checkpoint-interval` to trade extra recomputation for lower adjoint memory
+* `--forward-shot-batch-size` to control forward-only survey batching (diagnostics/metrics): `1` is lowest memory, larger values can improve throughput
+* `--grad-shot-batch-size` to control forward+adjoint shot batching during gradient accumulation: `1` is lowest memory, larger values can improve throughput
+* `--source-window-enabled`, `--source-window-alpha`, `--source-window-start`, and `--source-window-stop` to control Stride-like Tukey source preprocessing before injection
 * `--print-shot-progress` to print active source IDs for each step (useful for long runs)
 * `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update
-* `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments
+* `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments. If reflection is omitted, the default follows Stride's absorbing-width heuristic.
 * `--density-model`, `--attenuation-model`, and `--attenuation-power` to enable fixed extra medium terms in the JAX solver
 * `--interpolation-type {linear,hicks}` to select source/receiver interpolation
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
@@ -194,6 +197,13 @@ Parity note:
 * The JAX continuation path now uses a Stride-like cosine low-pass filter with the same `0.75` relaxation factor by default, rather than a hard FFT cutoff. The explicit adjoint applies the corresponding filter transpose so the gradient remains consistent with the filtered loss.
 * The JAX solver now runs on a padded domain by default (`50` extra cells per side) so the damping frame sits outside the physical model, and its spatial operator now defaults to `space_order=10` rather than the old three-point Laplacian.
 * The JAX solver now also supports optional fixed density/buoyancy and attenuation fields while still inverting for velocity. These fields participate in both the forward simulation and the explicit velocity adjoint when enabled.
+* The attenuation path now mirrors Stride's Devito operator more closely by converting attenuation from `dB/cm` to Nepers and using a centered-in-time attenuation update for power `0`.
+* The `sponge2` boundary path now tracks Stride defaults more closely by leaving the update mask fully active (no hard edge clamp) and deriving the reflection coefficient from absorbing width when not explicitly overridden.
+* The `sponge2` stencil now also applies local `vp^2` scaling in the damped second-order update, matching the way Stride's Devito acoustic stencil injects the sponge boundary term.
+* Stride-like damping field construction now uses pointwise local velocity scaling rather than a global maximum-velocity scale when velocity scaling is enabled.
+* Source preprocessing now mirrors Stride's setup more closely by applying a configurable Tukey window over a configurable time-bounds interval in both forward source injection and adjoint-source (trace cotangent) preparation.
+* Forward-only survey calls (observation generation, diagnostics, and final metrics) now use a dedicated no-checkpoint path, and optionally support controlled shot mini-batching via `forward_shot_batch_size` for better speed/memory tuning.
+* The explicit adjoint accumulation now also supports optional shot mini-batching (`grad_shot_batch_size`) while preserving the same objective/gradient through masked tail handling on partial batches.
 * Boundary damping still supports three JAX-side modes: `legacy` taper mask, `stride_like` absorbing-profile mask, and a Stride-inspired `sponge2` damped second-order update. This improves boundary parity substantially, but it is still not a full Devito boundary operator implementation.
 * The JAX path remains an approximation rather than a full Stride reimplementation. Remaining gaps include no full complex-frequency-shift PML2 auxiliary-field system and no direct reproduction yet of Stride's buoyancy/attenuation parameter gradients.
 * Full-grid runs are still demanding. The solver now reduces memory by accumulating shots sequentially and replaying the adjoint in checkpointed time segments, but large benchmark-scale runs may still need smaller shot subsets, smaller checkpoint intervals, or more capable hardware.

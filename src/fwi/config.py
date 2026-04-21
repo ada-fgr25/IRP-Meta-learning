@@ -120,11 +120,12 @@ class SolverConfig:
     mode (`sine` or `power`). `damping_power_degree` is used when
     `damping_type='power'`.
     `damping_reflection_coefficient` mirrors Stride's coefficient used to
-    derive a physically motivated damping scale from the absorbing width.
+    derive a physically motivated damping scale from the absorbing width. When
+    omitted (`None`), we follow Stride's default width-dependent heuristic.
     `damping_max_coefficient` can override that derived scale. If it is `None`,
     the coefficient is derived from absorbing width and spacing.
     `damping_velocity_scale` mirrors Stride's optional velocity scaling by using
-    the maximum model velocity when deriving the damping field.
+    the local model velocity when deriving the damping field.
     `extra_cells_x` and `extra_cells_y` add a fixed halo around the inversion
     model before the damping frame is applied. This mirrors Stride's use of an
     extended solver domain, where the absorbing boundary sits outside the
@@ -141,6 +142,10 @@ class SolverConfig:
     `IsoAcousticDevito` scaling `2 * dt**2 * vp / max(dx, dy)` and, unless
     `diff_source` is enabled, divides once more by `dt` exactly as the Devito
     implementation does.
+    `source_window_enabled` applies a Stride-like Tukey source window before
+    injection. `source_window_alpha` is the Tukey taper parameter used by
+    Stride. `source_window_start` and `source_window_stop` mirror Stride's
+    `time_bounds` behavior by defining the active source interval.
     `diff_source` mirrors Stride's optional behaviour of injecting the first
     time derivative of the source wavelet instead of the raw wavelet.
     `stride_grad_processing` toggles a JAX approximation of Stride's default
@@ -155,6 +160,12 @@ class SolverConfig:
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
+    `forward_shot_batch_size` controls shot-level batching for forward-only
+    surveys (for example diagnostics and final metrics). `1` is the most
+    memory-conservative setting; larger values trade memory for throughput.
+    `grad_shot_batch_size` controls shot-level batching for the forward+adjoint
+    gradient path. `1` keeps the most conservative sequential accumulation.
+    Higher values can improve throughput when memory headroom allows.
     """
 
     damping_cells: int = 40
@@ -162,7 +173,7 @@ class SolverConfig:
     damping_mode: str = "stride_like"
     damping_type: str = "sine"
     damping_power_degree: int = 2
-    damping_reflection_coefficient: float = 1.0e-3
+    damping_reflection_coefficient: float | None = None
     damping_max_coefficient: float | None = None
     damping_velocity_scale: bool = True
     extra_cells_x: int = 50
@@ -170,6 +181,10 @@ class SolverConfig:
     space_order: int = 10
     kernel: str = "OT4"
     source_scale_mode: str = "stride"
+    source_window_enabled: bool = True
+    source_window_alpha: float = 1.0e-3
+    source_window_start: int = 0
+    source_window_stop: int | None = None
     diff_source: bool = False
     stride_grad_processing: bool = True
     mask_grad: bool = True
@@ -181,6 +196,8 @@ class SolverConfig:
     trace_filter_order: int = 1
     trace_filter_zero_phase: bool = False
     checkpoint_interval: int = 32
+    forward_shot_batch_size: int = 1
+    grad_shot_batch_size: int = 1
 
 
 @dataclass(frozen=True)

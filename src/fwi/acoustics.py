@@ -269,8 +269,15 @@ def _build_stride_like_damping_sigma(
 
     damping_type = config.solver.damping_type
     power_degree = max(int(config.solver.damping_power_degree), 1)
+    reflection_coeff = config.solver.damping_reflection_coefficient
+    if reflection_coeff is None:
+        # Match Stride's boundary default used by `SpongeBoundary2` and related
+        # helpers when no explicit reflection coefficient is provided.
+        reflection_coeff = 10.0 ** (
+            -(jnp.log10(jnp.maximum(cells, 1.0)) - 1.0) / jnp.log10(2.0) - 3.0
+        )
     reflection = jnp.asarray(
-        max(float(config.solver.damping_reflection_coefficient), 1.0e-12),
+        jnp.maximum(jnp.asarray(reflection_coeff), 1.0e-12),
         dtype=velocity.dtype,
     )
 
@@ -314,7 +321,9 @@ def _build_stride_like_damping_sigma(
 
     sigma = coeff_x * px[:, None] + coeff_y * py[None, :]
     if config.solver.damping_velocity_scale:
-        sigma = sigma * jnp.max(velocity)
+        # Stride scales damping pointwise by local velocity when the damping
+        # field shape matches the velocity field shape (which is the case here).
+        sigma = sigma * velocity
 
     return sigma.astype(velocity.dtype)
 
@@ -358,7 +367,11 @@ def _build_boundary_terms(
         # Stride's SpongeBoundary2 scales damping by 7*dt before injecting it in
         # the second-order damped update equation.
         sponge_damp = jnp.asarray(7.0, dtype=velocity.dtype) * sigma * config.time.dt
-        return interior, sponge_damp
+        # Stride's boundary operator updates both interior and absorbing
+        # subdomains without forcing the outer stencil rows/columns to zero.
+        # Returning an all-ones mask keeps the update active everywhere and lets
+        # the sponge damping field itself define where attenuation is applied.
+        return jnp.ones_like(velocity), sponge_damp
 
     raise ValueError(
         f"Unsupported damping_mode '{config.solver.damping_mode}'. "
@@ -526,9 +539,108 @@ def _prepare_source_wavelet(
     - divide once more by `dt` when injecting the undifferentiated source
     """
 
-    if config.solver.diff_source:
-        return _time_derivative(wavelet, config.time.dt)
-    return wavelet
+    prepared = (
+        _time_derivative(wavelet, config.time.dt)
+        if config.solver.diff_source
+        else wavelet
+    )
+    return _apply_stride_like_time_window(prepared, config, axis=0)
+
+
+def _stride_like_tukey_window(
+    length: int,
+    alpha: float,
+    dtype,
+) -> jnp.ndarray:
+    """Return a symmetric Tukey window matching Stride/Scipy behavior.
+
+    Stride uses `scipy.signal.get_window(('tukey', alpha), length, False)`.
+    We implement the same periodic=False variant in pure JAX so source
+    preprocessing stays differentiable/JIT-compatible.
+    """
+
+    window_length = max(int(length), 0)
+    if window_length <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+    if window_length == 1:
+        return jnp.ones((1,), dtype=dtype)
+
+    alpha = float(alpha)
+    if alpha <= 0.0:
+        return jnp.ones((window_length,), dtype=dtype)
+    if alpha >= 1.0:
+        n = jnp.arange(window_length, dtype=dtype)
+        return 0.5 - 0.5 * jnp.cos(2.0 * jnp.pi * n / (window_length - 1))
+
+    n = jnp.arange(window_length, dtype=dtype)
+    x = n / (window_length - 1)
+    alpha_half = alpha / 2.0
+
+    left = 0.5 * (1.0 + jnp.cos(jnp.pi * ((2.0 * x / alpha) - 1.0)))
+    middle = jnp.ones_like(x)
+    right = 0.5 * (1.0 + jnp.cos(jnp.pi * ((2.0 * x / alpha) - (2.0 / alpha) + 1.0)))
+
+    return jnp.where(
+        x < alpha_half, left, jnp.where(x <= 1.0 - alpha_half, middle, right)
+    )
+
+
+def _stride_like_source_window(
+    n_time: int,
+    start: int,
+    stop: int | None,
+    alpha: float,
+    dtype,
+) -> jnp.ndarray:
+    """Return Stride-like time-bounded Tukey source window.
+
+    This mirrors Stride's `time_bounds` source preparation:
+    - build a Tukey window over `[start:stop]`
+    - pad zeros outside that interval
+    """
+
+    n_time = max(int(n_time), 0)
+    if n_time <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    start_idx = max(int(start), 0)
+    stop_idx = n_time if stop is None else min(max(int(stop), 0), n_time)
+    if stop_idx <= start_idx:
+        return jnp.zeros((n_time,), dtype=dtype)
+
+    core = _stride_like_tukey_window(stop_idx - start_idx, alpha, dtype)
+    leading_zeros = jnp.zeros((start_idx,), dtype=dtype)
+    trailing_zeros = jnp.zeros((n_time - stop_idx,), dtype=dtype)
+    return jnp.concatenate((leading_zeros, core, trailing_zeros))
+
+
+def _apply_stride_like_time_window(
+    values: jnp.ndarray,
+    config: BrainFWIConfig,
+    axis: int = 0,
+) -> jnp.ndarray:
+    """Apply the configured Stride-like Tukey time window to a tensor.
+
+    The same windowing pattern is used by Stride in forward source preparation
+    and when loading adjoint sources. Keeping one helper avoids drift between
+    those two paths in the JAX implementation.
+    """
+
+    if not config.solver.source_window_enabled:
+        return values
+
+    axis = int(axis)
+    n_time = values.shape[axis]
+    window = _stride_like_source_window(
+        n_time,
+        config.solver.source_window_start,
+        config.solver.source_window_stop,
+        config.solver.source_window_alpha,
+        values.dtype,
+    )
+    reshape = [1] * values.ndim
+    reshape[axis] = n_time
+    return values * window.reshape(reshape)
 
 
 def _source_scale(
@@ -626,22 +738,35 @@ def _attenuation_update(
     velocity: jnp.ndarray,
     attenuation: jnp.ndarray | None,
     config: BrainFWIConfig,
-) -> jnp.ndarray:
-    """Return the explicit attenuation contribution for one time step.
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return attenuation contributions for one time step.
 
     Stride supports attenuation powers `0` and `2`. We mirror those options in
-    the JAX update while keeping the fields fixed. The returned tensor is the
-    additive contribution that should be combined with the usual pressure and
-    source updates.
+    the JAX update while keeping the fields fixed.
+
+    Returns:
+    - explicit_update: additive right-hand-side contribution
+    - implicit_factor: coefficient for a Devito-like centred `u_t` term
+      affecting `u_{n+1}` and `u_{n-1}` (used for power `0`)
     """
 
     if attenuation is None:
-        return jnp.zeros_like(u_curr)
+        zeros = jnp.zeros_like(u_curr)
+        return zeros, zeros
 
     power = int(config.model.attenuation_power)
+    # Stride converts alpha from dB/cm into Nepers before applying the
+    # attenuation stencil. We mirror that conversion to keep attenuation scales
+    # consistent with the Devito operator path.
+    db_to_neper = (
+        100.0 * (1.0e-6 / (2.0 * jnp.pi)) ** power / (20.0 * jnp.log10(jnp.exp(1.0)))
+    )
+    alpha_neper = attenuation * db_to_neper
+
     if power == 0:
-        quantity_prev = u_prev
-        quantity_curr = u_curr
+        coeff = 2.0 * alpha_neper * velocity
+        implicit_factor = 0.5 * config.time.dt * coeff
+        return jnp.zeros_like(u_curr), implicit_factor
     elif power == 2:
         quantity_prev = -_laplacian(
             u_prev,
@@ -658,8 +783,9 @@ def _attenuation_update(
     else:
         raise ValueError(f"Unsupported attenuation_power '{power}'. Use 0 or 2.")
 
-    coeff = 2.0 * attenuation * (velocity ** (power + 1))
-    return -config.time.dt * coeff * (quantity_curr - quantity_prev)
+    coeff = 2.0 * alpha_neper * (velocity ** (power + 1))
+    explicit_update = -config.time.dt * coeff * (quantity_curr - quantity_prev)
+    return explicit_update, jnp.zeros_like(u_curr)
 
 
 def _propose_next_field(
@@ -689,7 +815,7 @@ def _propose_next_field(
     pressure_update = (config.time.dt**2) * _spatial_operator(
         u_curr, velocity_sq, density, config
     )
-    attenuation_update = _attenuation_update(
+    attenuation_update, attenuation_implicit = _attenuation_update(
         u_prev,
         u_curr,
         velocity,
@@ -717,23 +843,40 @@ def _propose_next_field(
 
     if config.solver.damping_mode == "sponge2":
         # Discrete analogue of Stride's second-order sponge damping term:
-        #   u_tt - L + 2*damp*u_t + damp^2*u = source
-        # with centred u_t approximation. Solving explicitly for u_{n+1} gives:
-        #   u_{n+1} = [2u_n - (1-d)u_{n-1} + dt^2*L(u_n) + src - d^2*u_n] / (1+d)
-        # where `d` is the pre-scaled damping coefficient field.
+        #   u_tt - L + vp^2 * (2*damp*u_t + damp^2*u) = source
+        # with centred u_t approximation. This mirrors Stride's Devito
+        # construction where `boundary_term` is multiplied by `vp^2` in the
+        # wave equation stencil before solving for `u_{n+1}`.
+        #
+        # With `u_t ≈ (u_{n+1}-u_{n-1})/(2*dt)`, we obtain:
+        #   u_{n+1} =
+        #     [2u_n - (1-s)u_{n-1} + dt^2*L(u_n) + src - q*u_n] / (1+s)
+        # where:
+        #   s = vp^2 * damp * dt
+        #   q = vp^2 * damp^2 * dt^2
+        # and `damp` is the pre-scaled SpongeBoundary2 field (`7*sigma*dt`).
+        sponge_linear = velocity_sq * sponge_damp * config.time.dt
+        sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
         numerator = (
             2.0 * u_curr
-            - (1.0 - sponge_damp) * u_prev
+            - (1.0 - sponge_linear - attenuation_implicit) * u_prev
             + pressure_update
             + attenuation_update
             + source_update
-            - (sponge_damp**2) * u_curr
+            - sponge_quadratic * u_curr
         )
-        return boundary_mask * (numerator / (1.0 + sponge_damp))
+        return boundary_mask * (
+            numerator / (1.0 + sponge_linear + attenuation_implicit)
+        )
 
-    return boundary_mask * (
-        2.0 * u_curr - u_prev + pressure_update + attenuation_update + source_update
+    numerator = (
+        2.0 * u_curr
+        - (1.0 - attenuation_implicit) * u_prev
+        + pressure_update
+        + attenuation_update
+        + source_update
     )
+    return boundary_mask * (numerator / (1.0 + attenuation_implicit))
 
 
 def _advance_state(
@@ -949,6 +1092,114 @@ def _simulate_shot_with_checkpoints(
     return traces, checkpoint_prevs, checkpoint_currs, wavelet_segments, active_segments
 
 
+def _simulate_shot_forward_only(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    medium: AcousticMedium | None,
+    shot_index: jnp.ndarray,
+) -> jnp.ndarray:
+    """Run one shot without storing any checkpoint replay tensors.
+
+    This path is intended for forward-only use cases such as:
+    - metrics after optimisation
+    - diagnostic residual plots
+    - synthetic observation generation
+
+    It keeps only the current two wavefields plus the output traces, which is
+    materially cheaper than the checkpointed adjoint path for memory-heavy runs.
+    """
+
+    padded_velocity = _pad_model_for_solver(velocity, config)
+    padded_density = _pad_optional_field_for_solver(
+        None if medium is None else medium.density,
+        config,
+    )
+    padded_attenuation = _pad_optional_field_for_solver(
+        None if medium is None else medium.attenuation,
+        config,
+    )
+    (
+        solver_receivers,
+        solver_source_reference_gridpoints,
+        solver_source_coefficients,
+        solver_receiver_reference_gridpoints,
+        solver_receiver_coefficients,
+        wavelet,
+        use_hicks,
+    ) = _solver_acquisition_views(acquisition, config, padded_velocity.dtype)
+    source_index = solver_receivers[shot_index]
+    source_reference_gridpoint = solver_source_reference_gridpoints[shot_index]
+    source_coefficients = solver_source_coefficients[shot_index]
+    receiver_i = solver_receivers[:, 0]
+    receiver_j = solver_receivers[:, 1]
+    boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
+    source_wavelet = _prepare_source_wavelet(wavelet, config)
+
+    # Keep an explicit active mask so this scan remains robust even if future
+    # wavelet construction introduces padded/no-op samples.
+    active_mask = jnp.arange(source_wavelet.shape[0]) < wavelet.shape[0]
+
+    def step_forward_only(
+        carry: tuple[jnp.ndarray, jnp.ndarray],
+        xs: tuple[jnp.ndarray, jnp.ndarray],
+    ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+        """Advance one time step and record receiver samples."""
+
+        u_prev, u_curr = carry
+        source_value, active = xs
+        next_prev, u_next = _advance_state(
+            u_prev,
+            u_curr,
+            padded_velocity,
+            padded_density,
+            padded_attenuation,
+            source_index,
+            source_reference_gridpoint,
+            source_coefficients,
+            source_value,
+            active,
+            boundary_mask,
+            sponge_damp,
+            use_hicks,
+            config,
+        )
+        traces = jnp.where(
+            active,
+            _sample_receivers(
+                u_next,
+                receiver_i,
+                receiver_j,
+                solver_receiver_reference_gridpoints,
+                solver_receiver_coefficients,
+                use_hicks,
+            ),
+            0.0,
+        )
+        return (next_prev, u_next), traces
+
+    init = (jnp.zeros_like(padded_velocity), jnp.zeros_like(padded_velocity))
+    _, traces = jax.lax.scan(step_forward_only, init, (source_wavelet, active_mask))
+    return traces
+
+
+def _normalise_shot_batch_size(
+    total_shots: int,
+    shot_batch_size: int | None,
+    *,
+    argument_name: str,
+) -> int:
+    """Resolve and validate a generic shot-batch-size argument."""
+
+    if shot_batch_size is None:
+        return 1
+
+    batch_size = int(shot_batch_size)
+    if batch_size <= 0:
+        raise ValueError(f"{argument_name} must be a positive integer.")
+    return min(batch_size, max(total_shots, 1))
+
+
 def _replay_segment_history(
     start_carry: tuple[jnp.ndarray, jnp.ndarray],
     source_index: jnp.ndarray,
@@ -1021,6 +1272,74 @@ def simulate_shot(
     return traces
 
 
+def simulate_survey_forward_only(
+    velocity: jnp.ndarray,
+    acquisition: AcquisitionGeometry,
+    config: BrainFWIConfig,
+    medium: AcousticMedium | None = None,
+    shot_indices: jnp.ndarray | None = None,
+    shot_batch_size: int | None = None,
+) -> jnp.ndarray:
+    """Simulate a survey using the no-checkpoint forward-only path.
+
+    `shot_batch_size` controls how many shots are vmapped together in one
+    compile/execution unit. A value of `1` runs fully sequentially with the
+    lowest memory footprint; larger values can improve throughput when memory
+    headroom exists.
+    """
+
+    active_shot_indices = (
+        acquisition.require_solver_arrays()[1] if shot_indices is None else shot_indices
+    )
+    total_shots = int(active_shot_indices.shape[0])
+    batch_size = _normalise_shot_batch_size(
+        total_shots,
+        shot_batch_size,
+        argument_name="shot_batch_size",
+    )
+
+    if total_shots == 0:
+        # Keep shape parity with the regular survey path even for an empty shot
+        # selection.
+        return jnp.zeros(
+            (0, config.time.nt, acquisition.n_receivers),
+            dtype=velocity.dtype,
+        )
+
+    if batch_size == 1:
+        _, traces = jax.lax.scan(
+            lambda carry, shot_idx: (
+                carry,
+                _simulate_shot_forward_only(
+                    velocity,
+                    acquisition,
+                    config,
+                    medium,
+                    shot_idx,
+                ),
+            ),
+            None,
+            active_shot_indices,
+        )
+        return traces
+
+    batched_outputs = []
+    for start in range(0, total_shots, batch_size):
+        stop = min(start + batch_size, total_shots)
+        shot_batch = active_shot_indices[start:stop]
+        batch_traces = jax.vmap(
+            lambda shot_idx: _simulate_shot_forward_only(
+                velocity,
+                acquisition,
+                config,
+                medium,
+                shot_idx,
+            )
+        )(shot_batch)
+        batched_outputs.append(batch_traces)
+    return jnp.concatenate(batched_outputs, axis=0)
+
+
 def simulate_survey(
     velocity: jnp.ndarray,
     acquisition: AcquisitionGeometry,
@@ -1050,6 +1369,7 @@ def loss_and_grad(
     observed_data: jnp.ndarray,
     f_max_hz: float | None = None,
     shot_indices: jnp.ndarray | None = None,
+    shot_batch_size: int | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute the survey loss and explicit adjoint gradient in JAX.
 
@@ -1067,6 +1387,12 @@ def loss_and_grad(
     ) = acquisition.require_solver_arrays()
     active_shot_indices = (
         acquisition_shot_indices if shot_indices is None else shot_indices
+    )
+    total_shots = int(active_shot_indices.shape[0])
+    grad_batch_size = _normalise_shot_batch_size(
+        total_shots,
+        shot_batch_size,
+        argument_name="shot_batch_size",
     )
     padded_velocity = _pad_model_for_solver(velocity, config)
     padded_density = _pad_optional_field_for_solver(
@@ -1089,7 +1415,6 @@ def loss_and_grad(
     receiver_i = solver_receivers[:, 0]
     receiver_j = solver_receivers[:, 1]
     boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
-    grid_shape = padded_velocity.shape
 
     def shot_loss_grad(shot_index: jnp.ndarray, observed_shot: jnp.ndarray):
         """Run one forward/adjoint pair and return its loss contribution."""
@@ -1138,132 +1463,126 @@ def loss_and_grad(
             zero_phase=config.solver.trace_filter_zero_phase,
             adjoint=not config.solver.trace_filter_zero_phase,
         )
+        data_cotangents = _apply_stride_like_time_window(
+            data_cotangents, config, axis=0
+        )
         padded_data_cotangents = _pad_traces_to_segments(
             data_cotangents,
             wavelet_segments.shape[0],
             wavelet_segments.shape[1],
         )
 
-        def reverse_step(carry, xs):
-            """Reverse one time step of the discrete wave equation."""
+        def segment_transition(
+            segment_start_prev: jnp.ndarray,
+            segment_start_curr: jnp.ndarray,
+            segment_velocity: jnp.ndarray,
+            source_block: jnp.ndarray,
+            active_block: jnp.ndarray,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+            """Advance one full checkpoint segment and return segment outputs.
 
-            cotangent_next_prev, cotangent_next_curr, grad_velocity = carry
-            prev_field, curr_field, data_cotangent, active, source_block_value = xs
+            This fuses the reverse-time sensitivity into one VJP call per
+            segment instead of one VJP per time step. The discrete forward
+            logic is identical to `_step_shot_state`, so gradients remain
+            aligned with the exact solver update while reducing adjoint overhead.
+            """
 
-            def active_reverse(state):
-                active_cotangent_next_prev, active_cotangent_next_curr, active_grad = (
-                    state
+            padded_segment_velocity = _pad_model_for_solver(segment_velocity, config)
+
+            def segment_step(
+                carry: tuple[jnp.ndarray, jnp.ndarray],
+                step_xs: tuple[jnp.ndarray, jnp.ndarray],
+            ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+                source_value, active = step_xs
+                next_prev, next_curr = _advance_state(
+                    carry[0],
+                    carry[1],
+                    padded_segment_velocity,
+                    padded_density,
+                    padded_attenuation,
+                    source_index,
+                    source_reference_gridpoint,
+                    source_coefficients,
+                    source_value,
+                    active,
+                    boundary_mask,
+                    sponge_damp,
+                    use_hicks,
+                    config,
                 )
-
-                # The observation operator samples the next wavefield at receiver
-                # points, so its adjoint adds the trace-domain cotangents to the
-                # second component of the output state `(u_n, u_{n+1})`.
-                active_cotangent_next_curr = (
-                    active_cotangent_next_curr
-                    + _inject_receivers(
+                traces = jnp.where(
+                    active,
+                    _sample_receivers(
+                        next_curr,
                         receiver_i,
                         receiver_j,
                         solver_receiver_reference_gridpoints,
                         solver_receiver_coefficients,
-                        data_cotangent,
-                        grid_shape,
                         use_hicks,
-                    )
+                    ),
+                    0.0,
                 )
+                return (next_prev, next_curr), traces
 
-                # The state transition is treated as a pure function, so we can
-                # reuse JAX's exact linearisation of the discrete forward model.
-                # This keeps the explicit adjoint in lockstep with the solver even
-                # as we change kernels or source scaling details.
-                def state_transition(
-                    step_prev: jnp.ndarray,
-                    step_curr: jnp.ndarray,
-                    step_velocity: jnp.ndarray,
-                ) -> tuple[jnp.ndarray, jnp.ndarray]:
-                    padded_step_velocity = _pad_model_for_solver(step_velocity, config)
-                    return (
-                        step_curr,
-                        _propose_next_field(
-                            step_prev,
-                            step_curr,
-                            padded_step_velocity,
-                            padded_density,
-                            padded_attenuation,
-                            source_index,
-                            source_reference_gridpoint,
-                            source_coefficients,
-                            source_block_value,
-                            boundary_mask,
-                            sponge_damp,
-                            use_hicks,
-                            config,
-                        ),
-                    )
-
-                (_, _), state_vjp = jax.vjp(
-                    state_transition,
-                    prev_field,
-                    curr_field,
-                    velocity,
-                )
-                cotangent_prev, cotangent_curr, velocity_cotangent = state_vjp(
-                    (active_cotangent_next_prev, active_cotangent_next_curr)
-                )
-                return (
-                    cotangent_prev,
-                    cotangent_curr,
-                    active_grad + velocity_cotangent,
-                )
-
-            return (
-                jax.lax.cond(
-                    active,
-                    active_reverse,
-                    lambda state: state,
-                    carry,
-                ),
-                None,
+            (
+                segment_end_prev,
+                segment_end_curr,
+            ), segment_traces = jax.lax.scan(
+                segment_step,
+                (segment_start_prev, segment_start_curr),
+                (source_block, active_block),
             )
+            return segment_end_prev, segment_end_curr, segment_traces
 
         def reverse_segment(carry, xs):
-            """Replay one segment then sweep its steps in reverse."""
+            """Run one fused segment-level VJP for reverse propagation."""
 
+            cotangent_end_prev, cotangent_end_curr, grad_velocity = carry
             checkpoint_prev, checkpoint_curr, source_block, active_block, data_block = (
                 xs
             )
-            prev_fields, curr_fields = _replay_segment_history(
-                (checkpoint_prev, checkpoint_curr),
-                source_index,
-                source_reference_gridpoint,
-                source_coefficients,
-                receiver_i,
-                receiver_j,
-                solver_receiver_reference_gridpoints,
-                solver_receiver_coefficients,
-                padded_velocity,
-                padded_density,
-                padded_attenuation,
-                boundary_mask,
-                sponge_damp,
-                use_hicks,
-                config,
-                source_block,
-                active_block,
-            )
 
-            carry, _ = jax.lax.scan(
-                reverse_step,
-                carry,
-                (
-                    prev_fields,
-                    curr_fields,
-                    data_block,
-                    active_block,
+            # Inactive padded samples are no-ops in the forward segment scan.
+            # Zeroing their cotangents keeps the transposed trace injection
+            # exactly aligned with that behaviour.
+            active_trace_mask = active_block[:, None].astype(data_block.dtype)
+            segment_data_cotangent = data_block * active_trace_mask
+
+            (
+                _segment_end_prev,
+                _segment_end_curr,
+                _segment_traces,
+            ), segment_vjp = jax.vjp(
+                lambda step_prev, step_curr, step_velocity: segment_transition(
+                    step_prev,
+                    step_curr,
+                    step_velocity,
                     source_block,
+                    active_block,
                 ),
-                reverse=True,
+                checkpoint_prev,
+                checkpoint_curr,
+                velocity,
             )
-            return carry, None
+            (
+                cotangent_start_prev,
+                cotangent_start_curr,
+                velocity_cotangent,
+            ) = segment_vjp(
+                (
+                    cotangent_end_prev,
+                    cotangent_end_curr,
+                    segment_data_cotangent,
+                )
+            )
+            return (
+                (
+                    cotangent_start_prev,
+                    cotangent_start_curr,
+                    grad_velocity + velocity_cotangent,
+                ),
+                None,
+            )
 
         init_carry = (
             jnp.zeros_like(padded_velocity),
@@ -1288,19 +1607,67 @@ def loss_and_grad(
         del cotangent_initial_prev, cotangent_initial_curr
         return shot_loss, shot_grad
 
-    # Accumulate shots sequentially rather than with `vmap`. This keeps only
-    # one shot's forward/adjoint history live at a time, which is much more
-    # memory-friendly on large benchmark-sized problems.
-    def accumulate_shot(carry, xs):
+    if total_shots == 0:
+        return jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity)
+
+    if grad_batch_size == 1:
+        # Sequential accumulation keeps only one shot's forward/adjoint history
+        # live at a time, which is the most memory-conservative mode.
+        def accumulate_shot(carry, xs):
+            total_loss, total_grad = carry
+            shot_index, observed_shot = xs
+            shot_loss, shot_grad = shot_loss_grad(shot_index, observed_shot)
+            return (total_loss + shot_loss, total_grad + shot_grad), None
+
+        init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
+        (total_loss, total_grad), _ = jax.lax.scan(
+            accumulate_shot,
+            init,
+            (active_shot_indices, observed_data),
+        )
+        return total_loss, total_grad
+
+    # Batched shot accumulation improves throughput by evaluating several
+    # independent shot forward+adjoint solves together, while masking the tail
+    # of the final partial batch so objective and gradient remain unchanged.
+    n_batches = (total_shots + grad_batch_size - 1) // grad_batch_size
+    padded_size = n_batches * grad_batch_size
+    pad = padded_size - total_shots
+
+    batched_shot_indices = jnp.pad(active_shot_indices, (0, pad)).reshape(
+        n_batches, grad_batch_size
+    )
+    batched_observed = jnp.pad(
+        observed_data,
+        ((0, pad), (0, 0), (0, 0)),
+    ).reshape(
+        n_batches,
+        grad_batch_size,
+        observed_data.shape[1],
+        observed_data.shape[2],
+    )
+    batched_active_mask = jnp.pad(
+        jnp.ones((total_shots,), dtype=jnp.bool_),
+        (0, pad),
+        constant_values=False,
+    ).reshape(n_batches, grad_batch_size)
+
+    def accumulate_shot_batch(carry, xs):
         total_loss, total_grad = carry
-        shot_index, observed_shot = xs
-        shot_loss, shot_grad = shot_loss_grad(shot_index, observed_shot)
-        return (total_loss + shot_loss, total_grad + shot_grad), None
+        shot_batch, observed_batch, active_mask = xs
+        batch_losses, batch_grads = jax.vmap(shot_loss_grad)(shot_batch, observed_batch)
+
+        active_loss = active_mask.astype(batch_losses.dtype)
+        active_grad = active_mask.astype(batch_grads.dtype)[:, None, None]
+        return (
+            total_loss + jnp.sum(batch_losses * active_loss),
+            total_grad + jnp.sum(batch_grads * active_grad, axis=0),
+        ), None
 
     init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
     (total_loss, total_grad), _ = jax.lax.scan(
-        accumulate_shot,
+        accumulate_shot_batch,
         init,
-        (active_shot_indices, observed_data),
+        (batched_shot_indices, batched_observed, batched_active_mask),
     )
     return total_loss, total_grad

@@ -10,7 +10,16 @@ import unittest
 import jax
 import jax.numpy as jnp
 
-from fwi.acoustics import _build_boundary_terms, _source_scale
+from fwi.acoustics import (
+    _apply_stride_like_time_window,
+    _build_boundary_terms,
+    _prepare_source_wavelet,
+    _source_scale,
+    _stride_like_source_window,
+    loss_and_grad,
+    simulate_survey,
+    simulate_survey_forward_only,
+)
 from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
@@ -83,6 +92,66 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertEqual(params["acquisition"].n_receivers, 12)
         self.assertIn("medium", params)
 
+    def test_forward_only_survey_matches_checkpointed_forward(self):
+        """Forward-only mode should reproduce checkpointed forward traces."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        baseline = simulate_survey(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+        )
+        forward_only = simulate_survey_forward_only(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=1,
+        )
+
+        self.assertEqual(forward_only.shape, baseline.shape)
+        self.assertTrue(
+            bool(jnp.allclose(forward_only, baseline, rtol=1.0e-5, atol=1.0e-6))
+        )
+
+    def test_forward_only_shot_batching_is_numerically_stable(self):
+        """Shot batching should preserve forward-only survey results."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        sequential = simulate_survey_forward_only(
+            params["x_exact"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=1,
+        )
+        batched = simulate_survey_forward_only(
+            params["x_exact"],
+            params["acquisition"],
+            params["config"],
+            medium=params["medium"],
+            shot_batch_size=2,
+        )
+
+        self.assertEqual(batched.shape, sequential.shape)
+        self.assertTrue(
+            bool(jnp.allclose(batched, sequential, rtol=1.0e-5, atol=1.0e-6))
+        )
+
+    def test_forward_only_rejects_non_positive_shot_batch_size(self):
+        """Forward-only survey batching should validate input arguments."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+        with self.assertRaises(ValueError):
+            simulate_survey_forward_only(
+                params["x0"],
+                params["acquisition"],
+                params["config"],
+                medium=params["medium"],
+                shot_batch_size=0,
+            )
+
     def test_piecewise_medium_builder_returns_density_and_attenuation_fields(self):
         """Optional fixed medium fields should be constructible from velocity."""
 
@@ -152,6 +221,86 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertLess(int(jnp.max(rec_refs[:, 0])), hicks_config.grid.nx)
         self.assertLess(int(jnp.max(rec_refs[:, 1])), hicks_config.grid.ny)
 
+    def test_stride_like_source_window_respects_time_bounds(self):
+        """Source window should be non-zero only inside requested bounds."""
+
+        window = _stride_like_source_window(
+            n_time=16,
+            start=3,
+            stop=10,
+            alpha=1.0e-3,
+            dtype=jnp.float32,
+        )
+
+        self.assertEqual(window.shape, (16,))
+        self.assertTrue(bool(jnp.allclose(window[:3], 0.0)))
+        self.assertTrue(bool(jnp.allclose(window[10:], 0.0)))
+        self.assertGreater(float(jnp.sum(window[3:10])), 0.0)
+
+    def test_prepare_source_wavelet_applies_stride_like_windowing(self):
+        """Source preparation should apply Tukey window when enabled."""
+
+        base = _tiny_config()
+        config_with_window = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=True,
+                source_window_alpha=1.0e-3,
+                source_window_start=4,
+                source_window_stop=12,
+                diff_source=False,
+            ),
+        )
+        config_no_window = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=False,
+                diff_source=False,
+            ),
+        )
+        wavelet = jnp.ones((base.time.nt,), dtype=jnp.float32)
+
+        with_window = _prepare_source_wavelet(wavelet, config_with_window)
+        without_window = _prepare_source_wavelet(wavelet, config_no_window)
+
+        self.assertEqual(with_window.shape, wavelet.shape)
+        self.assertTrue(bool(jnp.allclose(without_window, wavelet)))
+        self.assertTrue(bool(jnp.allclose(with_window[:4], 0.0)))
+        self.assertTrue(bool(jnp.allclose(with_window[12:], 0.0)))
+        self.assertGreater(float(jnp.sum(with_window[4:12])), 0.0)
+
+    def test_stride_like_time_window_applies_across_trace_axis(self):
+        """Configured source window should also apply to adjoint/source traces."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=True,
+                source_window_alpha=1.0e-3,
+                source_window_start=2,
+                source_window_stop=7,
+            ),
+        )
+        traces = jnp.ones((10, 3), dtype=jnp.float32)
+        windowed = _apply_stride_like_time_window(traces, config, axis=0)
+
+        self.assertTrue(bool(jnp.allclose(windowed[:2], 0.0)))
+        self.assertTrue(bool(jnp.allclose(windowed[7:], 0.0)))
+        self.assertGreater(float(jnp.sum(windowed[2:7])), 0.0)
+
     def test_gradient_is_finite(self):
         """The differentiable solver should provide a finite adjoint signal."""
 
@@ -210,6 +359,35 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertTrue(
             bool(jnp.allclose(explicit_grad, autodiff_grad, rtol=5.0e-3, atol=5.0e-4))
+        )
+
+    def test_adjoint_shot_batching_matches_sequential_gradient(self):
+        """Shot-batched adjoint accumulation should preserve loss and gradient."""
+
+        params = init_params(jax.random.PRNGKey(0), config=_tiny_config())
+
+        loss_seq, grad_seq = loss_and_grad(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            params["medium"],
+            params["y_obs"],
+            shot_batch_size=1,
+        )
+        loss_batch, grad_batch = loss_and_grad(
+            params["x0"],
+            params["acquisition"],
+            params["config"],
+            params["medium"],
+            params["y_obs"],
+            shot_batch_size=2,
+        )
+
+        self.assertTrue(
+            bool(jnp.allclose(loss_batch, loss_seq, rtol=1.0e-6, atol=1.0e-8))
+        )
+        self.assertTrue(
+            bool(jnp.allclose(grad_batch, grad_seq, rtol=1.0e-5, atol=1.0e-6))
         )
 
     def test_explicit_adjoint_supports_higher_order_differentiation(self):
@@ -412,14 +590,116 @@ class Phase1BrainFWITests(unittest.TestCase):
         velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
         mask, sponge_damp = _build_boundary_terms(config, velocity)
 
-        self.assertTrue(bool(jnp.all(mask >= 0.0)))
-        self.assertTrue(bool(jnp.all(mask <= 1.0)))
+        # Stride's sponge boundary path applies damping terms directly rather
+        # than masking edge rows/columns to zero, so the update mask should be
+        # fully active.
+        self.assertTrue(bool(jnp.allclose(mask, 1.0)))
         self.assertGreater(float(jnp.max(sponge_damp)), 0.0)
         self.assertTrue(
             bool(
                 jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
             )
         )
+
+    def test_sponge2_default_reflection_matches_stride_width_rule(self):
+        """Default reflection coefficient should follow Stride's width heuristic."""
+
+        base = _tiny_config()
+        cells = 12
+        reflection = 10.0 ** (-(jnp.log10(float(cells)) - 1.0) / jnp.log10(2.0) - 3.0)
+
+        auto_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=cells,
+                damping_reflection_coefficient=None,
+            ),
+        )
+        explicit_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=cells,
+                damping_reflection_coefficient=float(reflection),
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+
+        _, damp_auto = _build_boundary_terms(auto_config, velocity)
+        _, damp_explicit = _build_boundary_terms(explicit_config, velocity)
+        self.assertTrue(
+            bool(jnp.allclose(damp_auto, damp_explicit, rtol=1.0e-6, atol=1.0e-8))
+        )
+
+    def test_sponge2_with_zero_absorbing_cells_yields_zero_damping(self):
+        """Sponge2 should reduce to zero boundary damping when width is zero."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=0,
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, sponge_damp = _build_boundary_terms(config, velocity)
+        self.assertTrue(bool(jnp.allclose(mask, 1.0)))
+        self.assertTrue(bool(jnp.allclose(sponge_damp, 0.0)))
+
+    def test_sponge2_damping_uses_local_velocity_scaling(self):
+        """Sponge2 damping should scale pointwise with local velocity."""
+
+        base = _tiny_config()
+        scaled_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=4,
+                damping_velocity_scale=True,
+            ),
+        )
+        unscaled_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                damping_mode="sponge2",
+                damping_cells=4,
+                damping_velocity_scale=False,
+            ),
+        )
+        velocity = jnp.full((base.grid.nx, base.grid.ny), 1500.0, dtype=jnp.float32)
+        velocity = velocity.at[0, base.grid.ny // 2].set(3000.0)
+
+        _, damp_scaled = _build_boundary_terms(scaled_config, velocity)
+        _, damp_unscaled = _build_boundary_terms(unscaled_config, velocity)
+        edge_i = 0
+        edge_j = base.grid.ny // 2
+
+        self.assertGreater(float(damp_unscaled[edge_i, edge_j]), 0.0)
+        ratio = float(damp_scaled[edge_i, edge_j] / damp_unscaled[edge_i, edge_j])
+        self.assertTrue(bool(jnp.isfinite(ratio)))
+        self.assertAlmostEqual(ratio, 3000.0, delta=5.0)
 
     def test_solver_domain_padding_wraps_physical_model_in_extra_halo(self):
         """The solver should run on a larger padded grid than the inversion model."""

@@ -24,7 +24,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
-from fwi.acoustics import simulate_survey
+from fwi.acoustics import simulate_survey_forward_only
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
@@ -99,6 +99,30 @@ def parse_args():
         help="Number of time steps to replay per adjoint checkpoint segment.",
     )
     parser.add_argument(
+        "--source-window-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like Tukey source windowing before injection.",
+    )
+    parser.add_argument(
+        "--source-window-alpha",
+        type=float,
+        default=1.0e-3,
+        help="Tukey alpha for source windowing when enabled.",
+    )
+    parser.add_argument(
+        "--source-window-start",
+        type=int,
+        default=0,
+        help="Inclusive source-window start sample.",
+    )
+    parser.add_argument(
+        "--source-window-stop",
+        type=int,
+        default=None,
+        help="Exclusive source-window stop sample (default: nt).",
+    )
+    parser.add_argument(
         "--damping-mode",
         choices=["legacy", "stride_like", "sponge2"],
         default="stride_like",
@@ -125,8 +149,11 @@ def parse_args():
     parser.add_argument(
         "--damping-reflection-coefficient",
         type=float,
-        default=1.0e-3,
-        help="Reflection target used to derive damping strength when not overridden.",
+        default=None,
+        help=(
+            "Optional reflection target used to derive damping strength. "
+            "If omitted, use Stride's default width-dependent heuristic."
+        ),
     )
     parser.add_argument(
         "--damping-max-coefficient",
@@ -138,7 +165,7 @@ def parse_args():
         "--damping-velocity-scale",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Scale damping by maximum velocity as in Stride's damping helper.",
+        help="Scale damping by local velocity as in Stride's damping helper.",
     )
     parser.add_argument(
         "--stride-grad-processing",
@@ -177,6 +204,24 @@ def parse_args():
         help="Comma-separated stage cutoffs for Stride-style frequency continuation.",
     )
     parser.add_argument("--shots-per-iter", type=int, default=32)
+    parser.add_argument(
+        "--forward-shot-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Shot mini-batch size for forward-only surveys used by diagnostics "
+            "and final metrics."
+        ),
+    )
+    parser.add_argument(
+        "--grad-shot-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Shot mini-batch size for forward+adjoint gradient accumulation. "
+            "Use 1 for the most conservative memory mode."
+        ),
+    )
     parser.add_argument(
         "--final-shots",
         type=int,
@@ -262,6 +307,12 @@ def build_config(args) -> BrainFWIConfig:
         ),
         solver=SolverConfig(
             checkpoint_interval=args.checkpoint_interval,
+            forward_shot_batch_size=args.forward_shot_batch_size,
+            grad_shot_batch_size=args.grad_shot_batch_size,
+            source_window_enabled=args.source_window_enabled,
+            source_window_alpha=args.source_window_alpha,
+            source_window_start=args.source_window_start,
+            source_window_stop=args.source_window_stop,
             damping_mode=args.damping_mode,
             damping_type=args.damping_type,
             damping_cells=args.damping_cells,
@@ -445,12 +496,13 @@ def _save_iteration_diagnostics(
             flush=True,
         )
     survey_start = perf_counter()
-    modelled_batch = simulate_survey(
+    modelled_batch = simulate_survey_forward_only(
         model,
         acquisition,
         config,
         medium=medium,
         shot_indices=active_shot_indices,
+        shot_batch_size=config.solver.forward_shot_batch_size,
     )
     modelled_batch = _wait_for_jax_result(modelled_batch)
     survey_elapsed = perf_counter() - survey_start
@@ -734,7 +786,12 @@ def main():
             lambda model, observed_batch, active_shot_indices, fmax_hz: dldx(
                 params,
                 model,
-                (observed_batch, fmax_hz, active_shot_indices),
+                (
+                    observed_batch,
+                    fmax_hz,
+                    active_shot_indices,
+                    config.solver.grad_shot_batch_size,
+                ),
             ),
             static_argnames=("fmax_hz",),
         )
@@ -742,7 +799,7 @@ def main():
             lambda model, fmax_hz: dldx(
                 params,
                 model,
-                (auxs[0], fmax_hz),
+                (auxs[0], fmax_hz, None, config.solver.grad_shot_batch_size),
             ),
             static_argnames=("fmax_hz",),
         )
@@ -951,6 +1008,8 @@ def main():
         metrics["final_shots"] = args.final_shots
         metrics["seed"] = args.seed
         metrics["checkpoint_interval"] = config.solver.checkpoint_interval
+        metrics["forward_shot_batch_size"] = config.solver.forward_shot_batch_size
+        metrics["grad_shot_batch_size"] = config.solver.grad_shot_batch_size
         metrics["damping_mode"] = config.solver.damping_mode
         metrics["damping_type"] = config.solver.damping_type
         metrics["damping_cells"] = config.solver.damping_cells
@@ -963,6 +1022,10 @@ def main():
         metrics["extra_cells_x"] = config.solver.extra_cells_x
         metrics["extra_cells_y"] = config.solver.extra_cells_y
         metrics["space_order"] = config.solver.space_order
+        metrics["source_window_enabled"] = config.solver.source_window_enabled
+        metrics["source_window_alpha"] = config.solver.source_window_alpha
+        metrics["source_window_start"] = config.solver.source_window_start
+        metrics["source_window_stop"] = config.solver.source_window_stop
         metrics["trace_filter_type"] = config.solver.trace_filter_type
         metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
         metrics["trace_filter_order"] = config.solver.trace_filter_order
@@ -1047,12 +1110,13 @@ def main():
         )
 
         final_survey_start = perf_counter()
-        y_hat = simulate_survey(
+        y_hat = simulate_survey_forward_only(
             x_hat,
             params["acquisition"],
             config,
             medium=params["medium"],
             shot_indices=final_metric_shot_indices,
+            shot_batch_size=config.solver.forward_shot_batch_size,
         )
         y_hat = _wait_for_jax_result(y_hat)
         final_survey_elapsed = perf_counter() - final_survey_start
@@ -1078,6 +1142,15 @@ def main():
         print(f"Max frequencies (Hz): {max_freqs_hz}")
         print(f"Random shots per iteration: {args.shots_per_iter}")
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
+        print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
+        print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
+        print(
+            "Source window (enabled/alpha/start/stop): "
+            f"{config.solver.source_window_enabled}/"
+            f"{config.solver.source_window_alpha}/"
+            f"{config.solver.source_window_start}/"
+            f"{config.solver.source_window_stop}"
+        )
         print(
             "Boundary damping mode/type/cells: "
             f"{config.solver.damping_mode}/"
