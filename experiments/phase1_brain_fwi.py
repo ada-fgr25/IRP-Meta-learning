@@ -93,6 +93,21 @@ def parse_args():
         help="Source/receiver interpolation mode for the JAX solver.",
     )
     parser.add_argument(
+        "--apply-coordinate-epsilon",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply Stride-like spacing-scaled coordinate epsilon before Hicks "
+            "coefficient construction."
+        ),
+    )
+    parser.add_argument(
+        "--coordinate-epsilon-scale",
+        type=float,
+        default=1.0e-3,
+        help="Scale factor for Stride-like coordinate epsilon (`scale * spacing`).",
+    )
+    parser.add_argument(
         "--checkpoint-interval",
         type=int,
         default=32,
@@ -198,6 +213,27 @@ def parse_args():
         help="Smoothing radius used when --smooth-grad is enabled.",
     )
     parser.add_argument(
+        "--fw3d-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Stride-style quarter-period trace shifts used in FW3D mode.",
+    )
+    parser.add_argument(
+        "--stride-trace-processing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply Stride-like differentiable ProcessObserved/ProcessTraces "
+            "conditioning before the misfit."
+        ),
+    )
+    parser.add_argument(
+        "--stride-trace-scale-per-shot",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable Stride-like optional scale_per_shot trace scaling.",
+    )
+    parser.add_argument(
         "--max-freqs-hz",
         type=str,
         default="100000,200000,300000",
@@ -299,6 +335,8 @@ def build_config(args) -> BrainFWIConfig:
             n_transducers=args.n_transducers,
             n_shots=args.n_shots,
             interpolation_type=args.interpolation_type,
+            apply_coordinate_epsilon=args.apply_coordinate_epsilon,
+            coordinate_epsilon_scale=args.coordinate_epsilon_scale,
         ),
         model=ModelConfig(
             density_model=args.density_model,
@@ -325,6 +363,9 @@ def build_config(args) -> BrainFWIConfig:
             smooth_grad=args.smooth_grad,
             norm_grad=args.norm_grad,
             grad_smooth_radius=args.grad_smooth_radius,
+            fw3d_mode=args.fw3d_mode,
+            stride_trace_processing=args.stride_trace_processing,
+            stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
         ),
     )
 
@@ -998,6 +1039,12 @@ def main():
         metrics["n_transducers"] = config.acquisition.n_transducers
         metrics["n_shots"] = config.acquisition.n_shots
         metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
+        metrics["apply_coordinate_epsilon"] = (
+            config.acquisition.apply_coordinate_epsilon
+        )
+        metrics["coordinate_epsilon_scale"] = (
+            config.acquisition.coordinate_epsilon_scale
+        )
         metrics["model_source"] = config.model.source
         metrics["density_model"] = config.model.density_model
         metrics["attenuation_model"] = config.model.attenuation_model
@@ -1030,6 +1077,11 @@ def main():
         metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
         metrics["trace_filter_order"] = config.solver.trace_filter_order
         metrics["trace_filter_zero_phase"] = config.solver.trace_filter_zero_phase
+        metrics["fw3d_mode"] = config.solver.fw3d_mode
+        metrics["stride_trace_processing"] = config.solver.stride_trace_processing
+        metrics["stride_trace_scale_per_shot"] = (
+            config.solver.stride_trace_scale_per_shot
+        )
         metrics["stride_grad_processing"] = config.solver.stride_grad_processing
         metrics["mask_grad"] = config.solver.mask_grad
         metrics["smooth_grad"] = config.solver.smooth_grad

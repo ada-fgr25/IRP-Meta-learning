@@ -157,6 +157,8 @@ Useful options include:
 * `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments. If reflection is omitted, the default follows Stride's absorbing-width heuristic.
 * `--density-model`, `--attenuation-model`, and `--attenuation-power` to enable fixed extra medium terms in the JAX solver
 * `--interpolation-type {linear,hicks}` to select source/receiver interpolation
+* `--apply-coordinate-epsilon` and `--coordinate-epsilon-scale` to control the Stride-style coordinate perturbation used before Hicks sparse interpolation setup
+* `--fw3d-mode`, `--stride-trace-processing`, and `--stride-trace-scale-per-shot` to toggle Stride-like shift/mute/filter/norm/scale trace conditioning in the JAX misfit path
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
 * `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
@@ -193,8 +195,10 @@ Parity note:
 * The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
 * The JAX solver now also mirrors several discrete `IsoAcousticDevito` choices more directly: `OT4` time stepping by default, Stride-style source scaling `2 * dt**2 * vp / max(dx, dy)` with optional `diff_source`, and an explicit adjoint built from the exact linearisation of that discrete update.
 * The JAX acquisition path now supports Stride-style `hicks` interpolation with precomputed sinc/Kaiser coefficients (including Stride's source smoothing variant), in addition to the existing `linear` mode.
+* Hicks acquisition building now also mirrors Stride's sparse-function setup more closely by adding the same tiny spacing-scaled coordinate epsilon (`1e-3 * spacing` by default) before precomputing interpolation stencils.
 * The optimisation loop now includes a Stride-like approximation of `ProcessGlobalGradient` (`mask_field -> smooth_field -> norm_field`) before each SGD/Adam update and still applies model clipping after each step to stay within physical velocity bounds.
 * The JAX continuation path now uses a Stride-like cosine low-pass filter with the same `0.75` relaxation factor by default, rather than a hard FFT cutoff. The explicit adjoint applies the corresponding filter transpose so the gradient remains consistent with the filtered loss.
+* The JAX loss path now includes a differentiable analogue of Stride's trace-processing pipeline: Stride-style wavelet/observed pre-filtering and FW3D shifts, followed by pre-misfit mute/filter/norm conditioning (and optional scale-per-shot), with cotangents computed through that processing so explicit adjoint gradients stay aligned.
 * The JAX solver now runs on a padded domain by default (`50` extra cells per side) so the damping frame sits outside the physical model, and its spatial operator now defaults to `space_order=10` rather than the old three-point Laplacian.
 * The JAX solver now also supports optional fixed density/buoyancy and attenuation fields while still inverting for velocity. These fields participate in both the forward simulation and the explicit velocity adjoint when enabled.
 * The attenuation path now mirrors Stride's Devito operator more closely by converting attenuation from `dB/cm` to Nepers and using a centered-in-time attenuation update for power `0`.
