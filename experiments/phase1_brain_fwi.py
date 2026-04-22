@@ -213,6 +213,21 @@ def parse_args():
         help="Smoothing radius used when --smooth-grad is enabled.",
     )
     parser.add_argument(
+        "--grad-norm-guess-change",
+        type=float,
+        default=0.5,
+        help=(
+            "Stride-like NormField scaling in percent: "
+            "mid_model * grad_norm_guess_change / 100."
+        ),
+    )
+    parser.add_argument(
+        "--grad-global-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use one global NormField normalisation value across steps.",
+    )
+    parser.add_argument(
         "--fw3d-mode",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -363,6 +378,8 @@ def build_config(args) -> BrainFWIConfig:
             smooth_grad=args.smooth_grad,
             norm_grad=args.norm_grad,
             grad_smooth_radius=args.grad_smooth_radius,
+            grad_norm_guess_change=args.grad_norm_guess_change,
+            grad_global_norm=args.grad_global_norm,
             fw3d_mode=args.fw3d_mode,
             stride_trace_processing=args.stride_trace_processing,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
@@ -974,17 +991,20 @@ def main():
         ) -> jnp.ndarray:
             """Apply the configured Stride-like gradient preprocessing stack."""
 
-            del model, stage_index, step_index
+            del stage_index, step_index
             if not config.solver.stride_grad_processing:
                 return grad
 
             return process_global_gradient_stride_like(
                 grad,
                 damping_cells=config.solver.damping_cells,
+                model=model,
                 mask_grad=config.solver.mask_grad,
                 smooth_grad=config.solver.smooth_grad,
                 smooth_radius=config.solver.grad_smooth_radius,
                 norm_grad=config.solver.norm_grad,
+                norm_guess_change=config.solver.grad_norm_guess_change,
+                global_norm=config.solver.grad_global_norm,
             )
 
         if args.optimizer == "sgd":
@@ -1087,6 +1107,8 @@ def main():
         metrics["smooth_grad"] = config.solver.smooth_grad
         metrics["norm_grad"] = config.solver.norm_grad
         metrics["grad_smooth_radius"] = config.solver.grad_smooth_radius
+        metrics["grad_norm_guess_change"] = config.solver.grad_norm_guess_change
+        metrics["grad_global_norm"] = config.solver.grad_global_norm
         metrics["initial_model_rmse"] = float(
             jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
         )
@@ -1211,11 +1233,13 @@ def main():
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(
-            "Grad pipeline (mask/smooth/norm, radius): "
+            "Grad pipeline (mask/smooth/norm, radius, norm_guess_change, global_norm): "
             f"{config.solver.mask_grad}/"
             f"{config.solver.smooth_grad}/"
             f"{config.solver.norm_grad}, "
-            f"{config.solver.grad_smooth_radius}"
+            f"{config.solver.grad_smooth_radius}, "
+            f"{config.solver.grad_norm_guess_change}, "
+            f"{config.solver.grad_global_norm}"
         )
         print(f"Saved metrics to: {metrics_path}")
         run_complete_marker = write_run_complete_marker(

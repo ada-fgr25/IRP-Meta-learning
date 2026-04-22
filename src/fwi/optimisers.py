@@ -53,10 +53,13 @@ def process_global_gradient_stride_like(
     grad: Array,
     *,
     damping_cells: int,
+    model: Array | None = None,
     mask_grad: bool = True,
     smooth_grad: bool = True,
     smooth_radius: int = 2,
     norm_grad: bool = True,
+    norm_guess_change: float = 0.5,
+    global_norm: bool = False,
 ) -> Array:
     """Approximate Stride's default `ProcessGlobalGradient` pipeline.
 
@@ -68,7 +71,8 @@ def process_global_gradient_stride_like(
     We reproduce the same high-level behaviour in pure JAX:
     - mask: zero gradient in the outer absorbing frame
     - smooth: apply a lightweight separable box filter
-    - norm: scale by max absolute amplitude to stabilise step magnitudes
+    - norm: scale by max absolute amplitude, then apply Stride's
+      `norm_guess_change` factor derived from the current model midpoint
     """
 
     processed = grad
@@ -86,9 +90,22 @@ def process_global_gradient_stride_like(
     if smooth_grad:
         processed = _box_smooth_2d(processed, radius=smooth_radius)
 
+    # Stride's default NormField uses per-step max-amplitude normalisation
+    # (`global_norm=False`) followed by a model-dependent correction:
+    #   var_corr = mid_model * norm_guess_change / 100
+    # We keep this behaviour in the JAX path so update magnitudes track the
+    # benchmark optimiser more closely.
     if norm_grad:
-        max_abs = jnp.max(jnp.abs(processed))
-        processed = processed / jnp.maximum(max_abs, 1.0e-12)
+        del global_norm
+        max_abs = jnp.max(jnp.abs(processed)) + 1.0e-31
+        var_corr = 1.0
+        if model is not None:
+            min_val = jnp.min(model)
+            max_val = jnp.max(model)
+            mid_val = 0.5 * (max_val + min_val)
+            guessed = mid_val * (norm_guess_change / 100.0)
+            var_corr = jnp.where(jnp.abs(guessed) > 0.0, guessed, 1.0)
+        processed = processed * (var_corr / max_abs)
 
     return processed
 

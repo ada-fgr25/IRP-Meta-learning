@@ -671,6 +671,26 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(processed[4, 3]), 0.0)
         self.assertGreater(float(processed[3, 4]), 0.0)
 
+    def test_stride_like_gradient_processing_applies_norm_guess_change(self):
+        """NormField parity should apply Stride's model-dependent scaling."""
+
+        grad = jnp.zeros((4, 4), dtype=jnp.float32).at[2, 2].set(5.0)
+        model = jnp.full((4, 4), 2000.0, dtype=jnp.float32)
+
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            model=model,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            norm_guess_change=0.5,
+        )
+
+        # With max |grad| = 5 and Stride-like var_corr = 2000 * 0.5 / 100 = 10,
+        # the peak amplitude should be scaled to 10.
+        self.assertTrue(bool(jnp.isclose(jnp.max(jnp.abs(processed)), 10.0)))
+
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""
 

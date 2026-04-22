@@ -160,6 +160,13 @@ class SolverConfig:
     `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
     processing switches. `grad_smooth_radius` controls the spatial radius of
     the smoothing kernel when `smooth_grad` is enabled.
+    `grad_norm_guess_change` mirrors Stride's `norm_guess_change` used by
+    `NormField`: after max-amplitude normalisation, gradients are rescaled by
+    `mid_model * grad_norm_guess_change / 100`. This is an important part of
+    Stride's default gradient magnitude calibration.
+    `grad_global_norm` mirrors Stride's `global_norm` knob. The current JAX
+    implementation keeps parity with the default (`False`) and uses per-step
+    normalisation values.
     `trace_filter_type`, `trace_filter_relaxation`, `trace_filter_order`, and
     `trace_filter_zero_phase` control the trace-domain `f_max` continuation
     filter. The defaults mirror Stride's low-pass continuation path more
@@ -204,6 +211,8 @@ class SolverConfig:
     smooth_grad: bool = True
     norm_grad: bool = True
     grad_smooth_radius: int = 2
+    grad_norm_guess_change: float = 0.5
+    grad_global_norm: bool = False
     trace_filter_type: str = "cos"
     trace_filter_relaxation: float = 0.75
     trace_filter_order: int = 1
