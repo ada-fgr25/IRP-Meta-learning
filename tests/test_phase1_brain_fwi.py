@@ -995,6 +995,20 @@ class Phase1BrainFWITests(unittest.TestCase):
         edge = float(mask[1, config.grid.ny // 2])
         self.assertGreaterEqual(centre, edge)
 
+    def test_stride_like_boundary_mode_keeps_edge_updates_active(self):
+        """Stride-like mode should avoid hard edge clamping in the update mask."""
+
+        config = _tiny_config()
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, _ = _build_boundary_terms(config, velocity)
+
+        # A strict hard clamp would force these corners to exactly zero.
+        # Stride-like damping keeps them active while attenuated.
+        self.assertGreater(float(mask[0, 0]), 0.0)
+        self.assertGreater(float(mask[0, -1]), 0.0)
+        self.assertGreater(float(mask[-1, 0]), 0.0)
+        self.assertGreater(float(mask[-1, -1]), 0.0)
+
     def test_sponge2_boundary_mode_exposes_positive_damping_field(self):
         """Sponge2 mode should return a non-zero damping field near boundaries."""
 

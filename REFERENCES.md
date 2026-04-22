@@ -43,6 +43,7 @@ The current backend split is now:
 * The JAX solver now also supports fixed density/buoyancy and attenuation fields so the forward physics can include those terms even though the inversion still optimises velocity only.
 * The JAX attenuation path now mirrors Stride's Devito handling more closely by applying Stride's `dB/cm` to Neper conversion and a centered-in-time attenuation update for the `power=0` law.
 * The JAX `sponge2` boundary path now aligns more closely with Stride defaults by removing hard edge clamping and using Stride's absorbing-width reflection-coefficient heuristic when not overridden.
+* The JAX `stride_like` damping-mask path now also removes extra hard edge clamping so boundary attenuation is governed directly by the Stride-style damping profile.
 * The JAX `sponge2` update now also mirrors the Devito stencil's local `vp^2` scaling of the sponge boundary term in the second-order time update.
 * Stride-like damping-field velocity scaling in JAX now follows Stride's pointwise local-velocity scaling behavior rather than applying a global max-velocity factor.
 * JAX source preprocessing now includes Stride-like Tukey windowing with configurable time bounds for both forward source injection and adjoint-source preparation, matching the corresponding Stride Devito setup patterns.

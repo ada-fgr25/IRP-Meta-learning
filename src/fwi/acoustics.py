@@ -360,7 +360,11 @@ def _build_boundary_terms(
     if config.solver.damping_mode == "stride_like":
         sigma = _build_stride_like_damping_sigma(config, velocity)
         damping = jnp.exp(-sigma * config.time.dt)
-        return damping * interior, jnp.zeros_like(velocity)
+        # Stride's boundary damping helper expresses attenuation directly through
+        # the damping field and does not additionally hard-clamp outer grid
+        # rows/columns to zero in the update mask. Returning the damping mask as
+        # is keeps this mode closer to the Stride/Devito behaviour.
+        return damping, jnp.zeros_like(velocity)
 
     if config.solver.damping_mode == "sponge2":
         sigma = _build_stride_like_damping_sigma(config, velocity)
