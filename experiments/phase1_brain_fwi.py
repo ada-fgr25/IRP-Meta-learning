@@ -207,6 +207,15 @@ def parse_args():
         help="Normalise gradient amplitudes before applying the update.",
     )
     parser.add_argument(
+        "--grad-smooth-sigma",
+        type=float,
+        default=0.25,
+        help=(
+            "Stride-like Gaussian smooth sigma (cells) for gradient "
+            "preprocessing; set <=0 to use legacy box radius."
+        ),
+    )
+    parser.add_argument(
         "--grad-smooth-radius",
         type=int,
         default=2,
@@ -377,6 +386,7 @@ def build_config(args) -> BrainFWIConfig:
             mask_grad=args.mask_grad,
             smooth_grad=args.smooth_grad,
             norm_grad=args.norm_grad,
+            grad_smooth_sigma=args.grad_smooth_sigma,
             grad_smooth_radius=args.grad_smooth_radius,
             grad_norm_guess_change=args.grad_norm_guess_change,
             grad_global_norm=args.grad_global_norm,
@@ -1001,6 +1011,7 @@ def main():
                 model=model,
                 mask_grad=config.solver.mask_grad,
                 smooth_grad=config.solver.smooth_grad,
+                smooth_sigma=config.solver.grad_smooth_sigma,
                 smooth_radius=config.solver.grad_smooth_radius,
                 norm_grad=config.solver.norm_grad,
                 norm_guess_change=config.solver.grad_norm_guess_change,
@@ -1106,6 +1117,7 @@ def main():
         metrics["mask_grad"] = config.solver.mask_grad
         metrics["smooth_grad"] = config.solver.smooth_grad
         metrics["norm_grad"] = config.solver.norm_grad
+        metrics["grad_smooth_sigma"] = config.solver.grad_smooth_sigma
         metrics["grad_smooth_radius"] = config.solver.grad_smooth_radius
         metrics["grad_norm_guess_change"] = config.solver.grad_norm_guess_change
         metrics["grad_global_norm"] = config.solver.grad_global_norm
@@ -1233,10 +1245,11 @@ def main():
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(
-            "Grad pipeline (mask/smooth/norm, radius, norm_guess_change, global_norm): "
+            "Grad pipeline (mask/smooth/norm, sigma, radius, norm_guess_change, global_norm): "
             f"{config.solver.mask_grad}/"
             f"{config.solver.smooth_grad}/"
             f"{config.solver.norm_grad}, "
+            f"{config.solver.grad_smooth_sigma}, "
             f"{config.solver.grad_smooth_radius}, "
             f"{config.solver.grad_norm_guess_change}, "
             f"{config.solver.grad_global_norm}"

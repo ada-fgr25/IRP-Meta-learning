@@ -49,6 +49,36 @@ def _box_smooth_2d(field: Array, radius: int) -> Array:
     return col_smoothed_t.T
 
 
+def _gaussian_kernel_1d(sigma: float, dtype) -> Array:
+    """Build a compact 1D Gaussian kernel for separable smoothing."""
+
+    sigma = max(float(sigma), 0.0)
+    if sigma <= 0.0:
+        return jnp.ones((1,), dtype=dtype)
+
+    radius = max(int(np.ceil(3.0 * sigma)), 1)
+    offsets = jnp.arange(-radius, radius + 1, dtype=dtype)
+    kernel = jnp.exp(-0.5 * (offsets / sigma) ** 2)
+    return kernel / jnp.sum(kernel)
+
+
+def _gaussian_smooth_2d(field: Array, sigma: float) -> Array:
+    """Apply Stride-like nearest-boundary Gaussian smoothing in 2D."""
+
+    kernel = _gaussian_kernel_1d(sigma, field.dtype)
+    radius = (kernel.shape[0] - 1) // 2
+    if radius <= 0:
+        return field
+
+    def convolve_1d(values: Array) -> Array:
+        padded = jnp.pad(values, (radius, radius), mode="edge")
+        return jnp.convolve(padded, kernel, mode="valid")
+
+    row_smoothed = jax.vmap(convolve_1d)(field)
+    col_smoothed_t = jax.vmap(convolve_1d)(row_smoothed.T)
+    return col_smoothed_t.T
+
+
 def process_global_gradient_stride_like(
     grad: Array,
     *,
@@ -56,6 +86,7 @@ def process_global_gradient_stride_like(
     model: Array | None = None,
     mask_grad: bool = True,
     smooth_grad: bool = True,
+    smooth_sigma: float = 0.25,
     smooth_radius: int = 2,
     norm_grad: bool = True,
     norm_guess_change: float = 0.5,
@@ -70,7 +101,8 @@ def process_global_gradient_stride_like(
 
     We reproduce the same high-level behaviour in pure JAX:
     - mask: zero gradient in the outer absorbing frame
-    - smooth: apply a lightweight separable box filter
+    - smooth: apply Stride-like Gaussian smoothing (`smooth_sigma=0.25`) by
+      default, with a legacy box-filter fallback when sigma is non-positive
     - norm: scale by max absolute amplitude, then apply Stride's
       `norm_guess_change` factor derived from the current model midpoint
     """
@@ -88,7 +120,10 @@ def process_global_gradient_stride_like(
             processed = processed * mask
 
     if smooth_grad:
-        processed = _box_smooth_2d(processed, radius=smooth_radius)
+        if float(smooth_sigma) > 0.0:
+            processed = _gaussian_smooth_2d(processed, sigma=smooth_sigma)
+        else:
+            processed = _box_smooth_2d(processed, radius=smooth_radius)
 
     # Stride's default NormField uses per-step max-amplitude normalisation
     # (`global_norm=False`) followed by a model-dependent correction:

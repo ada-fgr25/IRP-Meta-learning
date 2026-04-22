@@ -691,6 +691,35 @@ class Phase1BrainFWITests(unittest.TestCase):
         # the peak amplitude should be scaled to 10.
         self.assertTrue(bool(jnp.isclose(jnp.max(jnp.abs(processed)), 10.0)))
 
+    def test_stride_like_gradient_processing_supports_legacy_box_smoothing(self):
+        """Non-positive smooth_sigma should trigger box-filter fallback."""
+
+        grad = jnp.zeros((9, 9), dtype=jnp.float32).at[4, 4].set(1.0)
+        gaussian = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_sigma=0.25,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        box = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_sigma=0.0,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(gaussian))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(box))))
+        # Regression guard: the sigma<=0 branch should be an actual alternate
+        # smoothing path, not accidentally identical to the Gaussian one.
+        self.assertFalse(bool(jnp.allclose(gaussian, box)))
+
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""
 

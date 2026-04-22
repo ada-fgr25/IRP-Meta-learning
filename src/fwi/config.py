@@ -158,8 +158,10 @@ class SolverConfig:
     `stride_grad_processing` toggles a JAX approximation of Stride's default
     `ProcessGlobalGradient` pipeline before each optimiser update.
     `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
-    processing switches. `grad_smooth_radius` controls the spatial radius of
-    the smoothing kernel when `smooth_grad` is enabled.
+    processing switches. `grad_smooth_sigma` mirrors Stride's Gaussian
+    `smooth_sigma` (default `0.25` cells) used by `SmoothField`.
+    `grad_smooth_radius` is retained as a legacy fallback for runs that still
+    use the previous box-filter approximation.
     `grad_norm_guess_change` mirrors Stride's `norm_guess_change` used by
     `NormField`: after max-amplitude normalisation, gradients are rescaled by
     `mid_model * grad_norm_guess_change / 100`. This is an important part of
@@ -210,6 +212,7 @@ class SolverConfig:
     mask_grad: bool = True
     smooth_grad: bool = True
     norm_grad: bool = True
+    grad_smooth_sigma: float = 0.25
     grad_smooth_radius: int = 2
     grad_norm_guess_change: float = 0.5
     grad_global_norm: bool = False
