@@ -534,6 +534,7 @@ def _stride_like_shift_traces(
     f_max_hz: float | None,
     *,
     axis: int,
+    relaxation: float | None = None,
 ) -> jnp.ndarray:
     """Apply Stride's `shift_traces` step along the selected time axis.
 
@@ -548,7 +549,12 @@ def _stride_like_shift_traces(
 
     moved = jnp.moveaxis(traces, axis, -1)
     n_time = int(moved.shape[-1])
-    safe_relaxation = max(float(config.solver.trace_filter_relaxation), 1.0e-6)
+    filter_relaxation = (
+        config.solver.trace_filter_relaxation
+        if relaxation is None
+        else float(relaxation)
+    )
+    safe_relaxation = max(float(filter_relaxation), 1.0e-6)
     f_max_dimless = (
         jnp.asarray(f_max_hz, dtype=moved.dtype)
         * float(config.time.dt)
@@ -613,10 +619,11 @@ def _stride_like_mute_modelled(
     """
 
     mute_mask = (jnp.abs(observed) > 0.0).astype(modelled.dtype)
+    filter_relaxation = float(config.solver.trace_filter_relaxation_traces)
     mute_filter_fmax_hz = (
         float(f_max_hz)
         if f_max_hz is not None
-        else 0.5 * float(config.solver.trace_filter_relaxation) / float(config.time.dt)
+        else 0.5 * filter_relaxation / float(config.time.dt)
     )
     mute_mask = bandlimit_traces(
         mute_mask,
@@ -624,7 +631,7 @@ def _stride_like_mute_modelled(
         mute_filter_fmax_hz,
         axis=0,
         filter_type="cos",
-        relaxation=config.solver.trace_filter_relaxation,
+        relaxation=filter_relaxation,
         order=1,
         zero_phase=True,
     )
@@ -635,16 +642,23 @@ def _stride_like_filter_traces(
     traces: jnp.ndarray,
     config: BrainFWIConfig,
     f_max_hz: float | None,
+    *,
+    relaxation: float | None = None,
 ) -> jnp.ndarray:
     """Apply the configured Stride-like trace filter to one gather."""
 
+    filter_relaxation = (
+        config.solver.trace_filter_relaxation
+        if relaxation is None
+        else float(relaxation)
+    )
     return bandlimit_traces(
         traces,
         config.time.dt,
         f_max_hz,
         axis=0,
         filter_type=config.solver.trace_filter_type,
-        relaxation=config.solver.trace_filter_relaxation,
+        relaxation=filter_relaxation,
         order=config.solver.trace_filter_order,
         zero_phase=config.solver.trace_filter_zero_phase,
     )
@@ -661,11 +675,22 @@ def _process_observed_shot_for_stride_misfit(
         return observed_shot
 
     observed = (
-        _stride_like_filter_traces(observed_shot, config, f_max_hz)
+        _stride_like_filter_traces(
+            observed_shot,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_wavelets,
+        )
         if config.solver.stride_trace_filter_wavelets
         else observed_shot
     )
-    return _stride_like_shift_traces(observed, config, f_max_hz, axis=0)
+    return _stride_like_shift_traces(
+        observed,
+        config,
+        f_max_hz,
+        axis=0,
+        relaxation=config.solver.trace_filter_relaxation_wavelets,
+    )
 
 
 def _process_trace_pair_for_stride_misfit(
@@ -691,12 +716,22 @@ def _process_trace_pair_for_stride_misfit(
         else modelled_shot
     )
     modelled = (
-        _stride_like_filter_traces(muted_modelled, config, f_max_hz)
+        _stride_like_filter_traces(
+            muted_modelled,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_traces,
+        )
         if config.solver.stride_trace_filter_traces
         else muted_modelled
     )
     observed = (
-        _stride_like_filter_traces(observed_shot, config, f_max_hz)
+        _stride_like_filter_traces(
+            observed_shot,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_traces,
+        )
         if config.solver.stride_trace_filter_traces
         else observed_shot
     )
@@ -761,8 +796,19 @@ def _prepare_source_wavelet(
     prepared = _apply_stride_like_time_window(prepared, config, axis=0)
     if config.solver.stride_trace_processing:
         if config.solver.stride_trace_filter_wavelets:
-            prepared = _stride_like_filter_traces(prepared, config, f_max_hz)
-        prepared = _stride_like_shift_traces(prepared, config, f_max_hz, axis=0)
+            prepared = _stride_like_filter_traces(
+                prepared,
+                config,
+                f_max_hz,
+                relaxation=config.solver.trace_filter_relaxation_wavelets,
+            )
+        prepared = _stride_like_shift_traces(
+            prepared,
+            config,
+            f_max_hz,
+            axis=0,
+            relaxation=config.solver.trace_filter_relaxation_wavelets,
+        )
     return prepared
 
 

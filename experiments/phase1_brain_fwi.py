@@ -282,6 +282,18 @@ def parse_args():
         help="Apply Stride-like norm_per_shot in ProcessTraces.",
     )
     parser.add_argument(
+        "--trace-filter-relaxation-wavelets",
+        type=float,
+        default=0.75,
+        help="Stride-like filter relaxation for ProcessWavelets/ProcessObserved.",
+    )
+    parser.add_argument(
+        "--trace-filter-relaxation-traces",
+        type=float,
+        default=0.75,
+        help="Stride-like filter relaxation for ProcessTraces.",
+    )
+    parser.add_argument(
         "--stride-trace-scale-per-shot",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -428,6 +440,8 @@ def build_config(args) -> BrainFWIConfig:
             stride_trace_mute_traces=args.stride_trace_mute_traces,
             stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
+            trace_filter_relaxation_wavelets=args.trace_filter_relaxation_wavelets,
+            trace_filter_relaxation_traces=args.trace_filter_relaxation_traces,
         ),
     )
 
@@ -1158,6 +1172,12 @@ def main():
         metrics["source_window_stop"] = config.solver.source_window_stop
         metrics["trace_filter_type"] = config.solver.trace_filter_type
         metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
+        metrics["trace_filter_relaxation_wavelets"] = (
+            config.solver.trace_filter_relaxation_wavelets
+        )
+        metrics["trace_filter_relaxation_traces"] = (
+            config.solver.trace_filter_relaxation_traces
+        )
         metrics["trace_filter_order"] = config.solver.trace_filter_order
         metrics["trace_filter_zero_phase"] = config.solver.trace_filter_zero_phase
         metrics["fw3d_mode"] = config.solver.fw3d_mode
@@ -1310,6 +1330,11 @@ def main():
             f"{config.solver.stride_trace_mute_traces}/"
             f"{config.solver.stride_trace_norm_per_shot}/"
             f"{config.solver.stride_trace_scale_per_shot}"
+        )
+        print(
+            "Trace relaxations (wavelets/traces): "
+            f"{config.solver.trace_filter_relaxation_wavelets}/"
+            f"{config.solver.trace_filter_relaxation_traces}"
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(

@@ -171,10 +171,14 @@ class SolverConfig:
     `grad_global_norm` mirrors Stride's `global_norm` knob. The current JAX
     implementation keeps parity with the default (`False`) and uses per-step
     normalisation values.
-    `trace_filter_type`, `trace_filter_relaxation`, `trace_filter_order`, and
-    `trace_filter_zero_phase` control the trace-domain `f_max` continuation
-    filter. The defaults mirror Stride's low-pass continuation path more
-    closely by using the cosine filter family with relaxation `0.75`.
+    `trace_filter_type`, `trace_filter_order`, and `trace_filter_zero_phase`
+    control the trace-domain `f_max` continuation filter.
+    `trace_filter_relaxation_wavelets` mirrors Stride's
+    `filter_wavelets_relaxation` used by `ProcessWavelets`/`ProcessObserved`.
+    `trace_filter_relaxation_traces` mirrors Stride's
+    `filter_traces_relaxation` used by `ProcessTraces`.
+    `trace_filter_relaxation` is retained as a compatibility fallback and
+    defaults to the same `0.75` continuation value.
     `fw3d_mode` toggles Stride's quarter-period trace shift used in the
     benchmark scripts. `stride_trace_processing` enables a Stride-like
     pre-misfit trace-conditioning path (`ProcessObserved` + `ProcessTraces`)
@@ -228,6 +232,8 @@ class SolverConfig:
     grad_global_norm: bool = False
     trace_filter_type: str = "cos"
     trace_filter_relaxation: float = 0.75
+    trace_filter_relaxation_wavelets: float = 0.75
+    trace_filter_relaxation_traces: float = 0.75
     trace_filter_order: int = 1
     trace_filter_zero_phase: bool = False
     fw3d_mode: bool = True

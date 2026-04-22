@@ -533,6 +533,47 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(muted_pair[0], 0.0)))
         self.assertTrue(bool(jnp.allclose(unmuted_pair[0], modelled)))
 
+    def test_wavelet_preprocess_respects_wavelet_relaxation(self):
+        """ProcessWavelets filter should reflect wavelet-side relaxation."""
+
+        base = _tiny_config()
+        wavelet = jnp.asarray(
+            jnp.sin(2.0 * jnp.pi * jnp.arange(base.time.nt) / 5.0),
+            dtype=jnp.float32,
+        )
+        low_relax_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=False,
+                source_window_enabled=False,
+                trace_filter_relaxation_wavelets=0.5,
+            ),
+        )
+        high_relax_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=False,
+                source_window_enabled=False,
+                trace_filter_relaxation_wavelets=1.0,
+            ),
+        )
+        low_relaxed = _prepare_source_wavelet(wavelet, low_relax_config, 2.0e5)
+        high_relaxed = _prepare_source_wavelet(wavelet, high_relax_config, 2.0e5)
+
+        self.assertFalse(bool(jnp.allclose(low_relaxed, high_relaxed)))
+
     def test_stride_like_time_window_applies_across_trace_axis(self):
         """Configured source window should also apply to adjoint/source traces."""
 

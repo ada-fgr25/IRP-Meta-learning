@@ -159,6 +159,7 @@ Useful options include:
 * `--interpolation-type {linear,hicks}` to select source/receiver interpolation
 * `--apply-coordinate-epsilon` and `--coordinate-epsilon-scale` to control the Stride-style coordinate perturbation used before Hicks sparse interpolation setup
 * `--fw3d-mode`, `--stride-trace-processing`, `--stride-trace-filter-wavelets`, `--stride-trace-filter-traces`, `--stride-trace-mute-traces`, `--stride-trace-norm-per-shot`, and `--stride-trace-scale-per-shot` to control Stride-like shift/mute/filter/norm/scale trace-conditioning steps in the JAX misfit path
+* `--trace-filter-relaxation-wavelets` and `--trace-filter-relaxation-traces` to match Stride's separate wavelet-side and trace-side relaxation factors
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
 * `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
@@ -201,6 +202,7 @@ Parity note:
 * The JAX continuation path now uses a Stride-like cosine low-pass filter with the same `0.75` relaxation factor by default, rather than a hard FFT cutoff. The explicit adjoint applies the corresponding filter transpose so the gradient remains consistent with the filtered loss.
 * The JAX loss path now includes a differentiable analogue of Stride's trace-processing pipeline: Stride-style wavelet/observed pre-filtering and FW3D shifts, followed by pre-misfit mute/filter/norm conditioning (and optional scale-per-shot), with cotangents computed through that processing so explicit adjoint gradients stay aligned.
 * Trace-pipeline parity controls are now split per Stride step (`filter_wavelets`, `filter_traces`, `mute_traces`, `norm_per_shot`, and optional `scale_per_shot`) so each conditioning stage can be matched or ablated independently.
+* The JAX trace path now also keeps separate relaxation controls for wavelet/observed preprocessing and pre-misfit trace processing, matching Stride's `filter_wavelets_relaxation` vs `filter_traces_relaxation` split.
 * When optional `scale_per_shot` conditioning is enabled, the JAX path now also mirrors Stride's reference scaling semantics by using the raw observed shot as `scale_to` rather than the already processed observed gather.
 * The JAX solver now runs on a padded domain by default (`50` extra cells per side) so the damping frame sits outside the physical model, and its spatial operator now defaults to `space_order=10` rather than the old three-point Laplacian.
 * The JAX solver now also supports optional fixed density/buoyancy and attenuation fields while still inverting for velocity. These fields participate in both the forward simulation and the explicit velocity adjoint when enabled.
