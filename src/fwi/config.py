@@ -179,8 +179,15 @@ class SolverConfig:
     benchmark scripts. `stride_trace_processing` enables a Stride-like
     pre-misfit trace-conditioning path (`ProcessObserved` + `ProcessTraces`)
     inside the JAX loss, including mute/filter/norm parity while staying fully
-    differentiable. `stride_trace_scale_per_shot` mirrors Stride's optional
-    `scale_per_shot` step (disabled by default, as in the benchmark script).
+    differentiable.
+    `stride_trace_filter_wavelets` controls Stride-like filtering in
+    `ProcessWavelets`/`ProcessObserved` before forward modelling.
+    `stride_trace_filter_traces` controls Stride-like filtering in
+    `ProcessTraces` before the L2 loss.
+    `stride_trace_mute_traces`, `stride_trace_norm_per_shot`, and
+    `stride_trace_scale_per_shot` mirror the corresponding optional
+    `ProcessTraces` steps. The default benchmark path keeps mute+norm enabled
+    and scale disabled.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -225,6 +232,10 @@ class SolverConfig:
     trace_filter_zero_phase: bool = False
     fw3d_mode: bool = True
     stride_trace_processing: bool = True
+    stride_trace_filter_wavelets: bool = True
+    stride_trace_filter_traces: bool = True
+    stride_trace_mute_traces: bool = True
+    stride_trace_norm_per_shot: bool = True
     stride_trace_scale_per_shot: bool = False
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1

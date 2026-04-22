@@ -438,6 +438,101 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(with_raw_ref[0], without_raw_ref[0])))
         self.assertTrue(bool(jnp.allclose(with_raw_ref[1], without_raw_ref[1])))
 
+    def test_trace_pipeline_can_disable_wavelet_filter_step(self):
+        """Wavelet preprocessing should respect filter-wavelets toggle."""
+
+        base = _tiny_config()
+        wavelet = jnp.arange(base.time.nt, dtype=jnp.float32)
+        filtered_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                source_window_enabled=False,
+                fw3d_mode=False,
+                diff_source=False,
+            ),
+        )
+        unfiltered_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                source_window_enabled=False,
+                fw3d_mode=False,
+                diff_source=False,
+            ),
+        )
+
+        prepared_filtered = _prepare_source_wavelet(wavelet, filtered_config, 2.0e5)
+        prepared_unfiltered = _prepare_source_wavelet(wavelet, unfiltered_config, 2.0e5)
+
+        self.assertTrue(bool(jnp.allclose(prepared_unfiltered, wavelet)))
+        self.assertFalse(bool(jnp.allclose(prepared_filtered, wavelet)))
+
+    def test_trace_pipeline_can_disable_mute_step(self):
+        """ProcessTraces mute toggle should control modelled gather muting."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        muted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_traces=True,
+                stride_trace_filter_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+            ),
+        )
+        unmuted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_traces=False,
+                stride_trace_filter_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+            ),
+        )
+
+        muted_pair = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed,
+            observed,
+            muted_config,
+            f_max_hz=2.0e5,
+        )
+        unmuted_pair = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed,
+            observed,
+            unmuted_config,
+            f_max_hz=2.0e5,
+        )
+        self.assertTrue(bool(jnp.allclose(muted_pair[0], 0.0)))
+        self.assertTrue(bool(jnp.allclose(unmuted_pair[0], modelled)))
+
     def test_stride_like_time_window_applies_across_trace_axis(self):
         """Configured source window should also apply to adjoint/source traces."""
 

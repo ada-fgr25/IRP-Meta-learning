@@ -631,6 +631,25 @@ def _stride_like_mute_modelled(
     return modelled * mute_mask
 
 
+def _stride_like_filter_traces(
+    traces: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+) -> jnp.ndarray:
+    """Apply the configured Stride-like trace filter to one gather."""
+
+    return bandlimit_traces(
+        traces,
+        config.time.dt,
+        f_max_hz,
+        axis=0,
+        filter_type=config.solver.trace_filter_type,
+        relaxation=config.solver.trace_filter_relaxation,
+        order=config.solver.trace_filter_order,
+        zero_phase=config.solver.trace_filter_zero_phase,
+    )
+
+
 def _process_observed_shot_for_stride_misfit(
     observed_shot: jnp.ndarray,
     config: BrainFWIConfig,
@@ -641,15 +660,10 @@ def _process_observed_shot_for_stride_misfit(
     if not config.solver.stride_trace_processing:
         return observed_shot
 
-    observed = bandlimit_traces(
-        observed_shot,
-        config.time.dt,
-        f_max_hz,
-        axis=0,
-        filter_type=config.solver.trace_filter_type,
-        relaxation=config.solver.trace_filter_relaxation,
-        order=config.solver.trace_filter_order,
-        zero_phase=config.solver.trace_filter_zero_phase,
+    observed = (
+        _stride_like_filter_traces(observed_shot, config, f_max_hz)
+        if config.solver.stride_trace_filter_wavelets
+        else observed_shot
     )
     return _stride_like_shift_traces(observed, config, f_max_hz, axis=0)
 
@@ -666,34 +680,29 @@ def _process_trace_pair_for_stride_misfit(
     if not config.solver.stride_trace_processing:
         return modelled_shot, observed_shot
 
-    muted_modelled = _stride_like_mute_modelled(
-        modelled_shot,
-        observed_shot,
-        config,
-        f_max_hz,
+    muted_modelled = (
+        _stride_like_mute_modelled(
+            modelled_shot,
+            observed_shot,
+            config,
+            f_max_hz,
+        )
+        if config.solver.stride_trace_mute_traces
+        else modelled_shot
     )
-    modelled = bandlimit_traces(
-        muted_modelled,
-        config.time.dt,
-        f_max_hz,
-        axis=0,
-        filter_type=config.solver.trace_filter_type,
-        relaxation=config.solver.trace_filter_relaxation,
-        order=config.solver.trace_filter_order,
-        zero_phase=config.solver.trace_filter_zero_phase,
+    modelled = (
+        _stride_like_filter_traces(muted_modelled, config, f_max_hz)
+        if config.solver.stride_trace_filter_traces
+        else muted_modelled
     )
-    observed = bandlimit_traces(
-        observed_shot,
-        config.time.dt,
-        f_max_hz,
-        axis=0,
-        filter_type=config.solver.trace_filter_type,
-        relaxation=config.solver.trace_filter_relaxation,
-        order=config.solver.trace_filter_order,
-        zero_phase=config.solver.trace_filter_zero_phase,
+    observed = (
+        _stride_like_filter_traces(observed_shot, config, f_max_hz)
+        if config.solver.stride_trace_filter_traces
+        else observed_shot
     )
-    modelled = _stride_like_norm_per_shot(modelled)
-    observed = _stride_like_norm_per_shot(observed)
+    if config.solver.stride_trace_norm_per_shot:
+        modelled = _stride_like_norm_per_shot(modelled)
+        observed = _stride_like_norm_per_shot(observed)
 
     if config.solver.stride_trace_scale_per_shot:
         scale_to = (
@@ -751,16 +760,8 @@ def _prepare_source_wavelet(
     )
     prepared = _apply_stride_like_time_window(prepared, config, axis=0)
     if config.solver.stride_trace_processing:
-        prepared = bandlimit_traces(
-            prepared,
-            config.time.dt,
-            f_max_hz,
-            axis=0,
-            filter_type=config.solver.trace_filter_type,
-            relaxation=config.solver.trace_filter_relaxation,
-            order=config.solver.trace_filter_order,
-            zero_phase=config.solver.trace_filter_zero_phase,
-        )
+        if config.solver.stride_trace_filter_wavelets:
+            prepared = _stride_like_filter_traces(prepared, config, f_max_hz)
         prepared = _stride_like_shift_traces(prepared, config, f_max_hz, axis=0)
     return prepared
 

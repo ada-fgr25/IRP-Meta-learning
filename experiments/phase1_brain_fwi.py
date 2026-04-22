@@ -258,6 +258,30 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--stride-trace-filter-wavelets",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like filter_traces in ProcessWavelets/ProcessObserved.",
+    )
+    parser.add_argument(
+        "--stride-trace-filter-traces",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like filter_traces in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-mute-traces",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like mute_traces in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-norm-per-shot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like norm_per_shot in ProcessTraces.",
+    )
+    parser.add_argument(
         "--stride-trace-scale-per-shot",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -399,6 +423,10 @@ def build_config(args) -> BrainFWIConfig:
             grad_global_norm=args.grad_global_norm,
             fw3d_mode=args.fw3d_mode,
             stride_trace_processing=args.stride_trace_processing,
+            stride_trace_filter_wavelets=args.stride_trace_filter_wavelets,
+            stride_trace_filter_traces=args.stride_trace_filter_traces,
+            stride_trace_mute_traces=args.stride_trace_mute_traces,
+            stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
         ),
     )
@@ -1134,6 +1162,12 @@ def main():
         metrics["trace_filter_zero_phase"] = config.solver.trace_filter_zero_phase
         metrics["fw3d_mode"] = config.solver.fw3d_mode
         metrics["stride_trace_processing"] = config.solver.stride_trace_processing
+        metrics["stride_trace_filter_wavelets"] = (
+            config.solver.stride_trace_filter_wavelets
+        )
+        metrics["stride_trace_filter_traces"] = config.solver.stride_trace_filter_traces
+        metrics["stride_trace_mute_traces"] = config.solver.stride_trace_mute_traces
+        metrics["stride_trace_norm_per_shot"] = config.solver.stride_trace_norm_per_shot
         metrics["stride_trace_scale_per_shot"] = (
             config.solver.stride_trace_scale_per_shot
         )
@@ -1267,6 +1301,15 @@ def main():
             f"{config.solver.damping_mode}/"
             f"{config.solver.damping_type}/"
             f"{config.solver.damping_cells}"
+        )
+        print(
+            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale): "
+            f"{config.solver.stride_trace_processing}/"
+            f"{config.solver.stride_trace_filter_wavelets}/"
+            f"{config.solver.stride_trace_filter_traces}/"
+            f"{config.solver.stride_trace_mute_traces}/"
+            f"{config.solver.stride_trace_norm_per_shot}/"
+            f"{config.solver.stride_trace_scale_per_shot}"
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(
