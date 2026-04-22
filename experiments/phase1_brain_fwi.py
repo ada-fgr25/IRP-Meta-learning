@@ -426,26 +426,42 @@ def _build_random_shot_schedule(
     shots_per_iter: int,
     seed: int,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
-    """Pre-sample one deterministic random shot subset for each iteration.
+    """Pre-sample a Stride-like deterministic random shot schedule.
 
-    Stride's inverse benchmark chooses `32` shots randomly on every iteration.
-    We precompute that schedule once so the run is reproducible and so each
-    optimiser step sees a stable subset if its loss is evaluated multiple times.
+    Stride's `select_shot_ids(..., randomly=True)` does not sample each
+    iteration independently. Instead, it builds a random permutation queue of
+    available shot IDs and consumes `num` entries each iteration, returning the
+    selected IDs sorted. When the queue is exhausted, a new permutation is
+    generated and consumption continues.
+
+    Two subtle parity details matter:
+    - No repeats occur until the current permutation queue is exhausted.
+    - If the remaining queue length is smaller than `num`, that iteration uses
+      a smaller shot subset.
+
+    We mirror that behaviour so each optimisation step matches Stride's
+    selection math more closely while still staying reproducible in pure Python.
     """
 
     rng = np.random.default_rng(seed)
-    shot_positions = np.arange(int(available_shots.shape[0]), dtype=np.int32)
-    batch_size = min(int(shots_per_iter), int(available_shots.shape[0]))
+    # Stride sorts candidate IDs before random permutation in `_select_slice`.
+    shot_positions = np.sort(np.arange(int(available_shots.shape[0]), dtype=np.int32))
+    batch_size = max(min(int(shots_per_iter), int(available_shots.shape[0])), 1)
     schedule = []
+    selection_queue: list[int] = []
 
     for n_steps in stage_steps:
         stage_schedule = []
         for _ in range(n_steps):
-            chosen_positions = rng.choice(
-                shot_positions, size=batch_size, replace=False
-            )
-            chosen_positions = np.sort(chosen_positions)
-            stage_schedule.append(jnp.asarray(chosen_positions, dtype=jnp.int32))
+            if not selection_queue:
+                selection_queue = rng.permutation(shot_positions).tolist()
+
+            # Match Stride: consume up to `num` entries from the queue, which
+            # may yield a smaller subset near queue boundaries.
+            next_slice = selection_queue[:batch_size]
+            selection_queue = selection_queue[batch_size:]
+            next_slice.sort()
+            stage_schedule.append(jnp.asarray(next_slice, dtype=jnp.int32))
         schedule.append(tuple(stage_schedule))
 
     return tuple(schedule)

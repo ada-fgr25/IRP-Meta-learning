@@ -10,6 +10,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 
+from experiments.phase1_brain_fwi import _build_random_shot_schedule
 from fwi.acoustics import (
     _apply_stride_like_time_window,
     _build_boundary_terms,
@@ -921,6 +922,35 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertIn("(total=16)", long_preview)
         self.assertIn("...", long_preview)
+
+    def test_stride_like_random_shot_schedule_avoids_repeats_before_wrap(self):
+        """Random shot scheduling should consume one permutation before repeats."""
+
+        schedule = _build_random_shot_schedule(
+            available_shots=jnp.arange(8, dtype=jnp.int32),
+            stage_steps=(1, 2),
+            shots_per_iter=3,
+            seed=7,
+        )
+
+        first_cycle = jnp.concatenate((schedule[0][0], schedule[1][0], schedule[1][1]))
+        self.assertEqual(first_cycle.shape[0], 8)
+        self.assertEqual(int(jnp.unique(first_cycle).shape[0]), 8)
+
+    def test_stride_like_random_shot_schedule_allows_short_boundary_batches(self):
+        """Stride-like queue consumption should allow short batches at wrap boundaries."""
+
+        schedule = _build_random_shot_schedule(
+            available_shots=jnp.arange(8, dtype=jnp.int32),
+            stage_steps=(4,),
+            shots_per_iter=3,
+            seed=123,
+        )
+        batch_lengths = [int(batch.shape[0]) for batch in schedule[0]]
+
+        # With 8 shots and batch size 3, Stride's queue logic yields lengths:
+        # 3, 3, 2, then a new cycle starts.
+        self.assertEqual(batch_lengths[:3], [3, 3, 2])
 
     def test_run_complete_marker_writes_expected_artifact(self):
         """Completion marker should be created with artifact references."""
