@@ -383,6 +383,23 @@ def _build_boundary_terms(
     )
 
 
+def _sponge2_subdomain_masks(
+    sponge_damp: jnp.ndarray,
+    dtype: jnp.dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Derive explicit interior/boundary masks from Sponge2 damping.
+
+    Devito runs separate interior and boundary stencils for the acoustic step,
+    with the sponge damping term only active in absorbing subdomains. In JAX we
+    mirror that structure by building binary masks from the precomputed Sponge2
+    damping field (`sponge_damp` is zero in interior points).
+    """
+
+    boundary = (sponge_damp > 0).astype(dtype)
+    interior = 1.0 - boundary
+    return interior, boundary
+
+
 def _inject_linear_point(
     point_index: jnp.ndarray,
     point_value: jnp.ndarray,
@@ -1176,7 +1193,22 @@ def _propose_next_field(
         # and `damp` is the pre-scaled SpongeBoundary2 field (`7*sigma*dt`).
         sponge_linear = velocity_sq * sponge_damp * config.time.dt
         sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
-        numerator = (
+        interior_mask, boundary_subdomain_mask = _sponge2_subdomain_masks(
+            sponge_damp, u_curr.dtype
+        )
+
+        # Interior stencil: identical to the undamped second-order step.
+        interior_numerator = (
+            2.0 * u_curr
+            - (1.0 - attenuation_implicit) * u_prev
+            + pressure_update
+            + attenuation_update
+            + source_update
+        )
+        interior_update = interior_numerator / (1.0 + attenuation_implicit)
+
+        # Boundary stencil: add the Stride-style sponge terms.
+        boundary_numerator = (
             2.0 * u_curr
             - (1.0 - sponge_linear - attenuation_implicit) * u_prev
             + pressure_update
@@ -1184,9 +1216,13 @@ def _propose_next_field(
             + source_update
             - sponge_quadratic * u_curr
         )
-        return boundary_mask * (
-            numerator / (1.0 + sponge_linear + attenuation_implicit)
+        boundary_update = boundary_numerator / (
+            1.0 + sponge_linear + attenuation_implicit
         )
+        combined = (
+            interior_mask * interior_update + boundary_subdomain_mask * boundary_update
+        )
+        return boundary_mask * combined
 
     numerator = (
         2.0 * u_curr

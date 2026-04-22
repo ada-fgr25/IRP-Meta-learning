@@ -16,6 +16,7 @@ from fwi.acoustics import (
     _process_trace_pair_for_stride_misfit,
     _build_boundary_terms,
     _prepare_source_wavelet,
+    _sponge2_subdomain_masks,
     _source_scale,
     _stride_like_shift_traces,
     _stride_like_source_window,
@@ -1033,6 +1034,25 @@ class Phase1BrainFWITests(unittest.TestCase):
                 jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
             )
         )
+
+    def test_sponge2_subdomain_masks_split_interior_and_boundary(self):
+        """Sponge2 masks should partition zero-damp and damped subdomains."""
+
+        damp = jnp.asarray(
+            [
+                [0.2, 0.1, 0.2],
+                [0.1, 0.0, 0.1],
+                [0.2, 0.1, 0.2],
+            ],
+            dtype=jnp.float32,
+        )
+        interior, boundary = _sponge2_subdomain_masks(damp, jnp.float32)
+
+        self.assertTrue(bool(jnp.isclose(interior[1, 1], 1.0)))
+        self.assertTrue(bool(jnp.isclose(boundary[1, 1], 0.0)))
+        self.assertTrue(bool(jnp.isclose(interior[0, 0], 0.0)))
+        self.assertTrue(bool(jnp.isclose(boundary[0, 0], 1.0)))
+        self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
 
     def test_sponge2_default_reflection_matches_stride_width_rule(self):
         """Default reflection coefficient should follow Stride's width heuristic."""
