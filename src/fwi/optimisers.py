@@ -79,12 +79,36 @@ def _gaussian_smooth_2d(field: Array, sigma: float) -> Array:
     return col_smoothed_t.T
 
 
+def _stride_like_mask_rampoff(shape: tuple[int, int], ramp_size: int, dtype) -> Array:
+    """Build a Stride-like cosine ramp-off mask over the full field."""
+
+    nx, ny = shape
+    ramp = max(int(ramp_size), 0)
+    if ramp <= 1:
+        return jnp.ones((nx, ny), dtype=dtype)
+
+    dist_x = jnp.minimum(jnp.arange(nx), jnp.arange(nx)[::-1]).astype(jnp.float32)
+    dist_y = jnp.minimum(jnp.arange(ny), jnp.arange(ny)[::-1]).astype(jnp.float32)
+
+    def taper_from_dist(dist: Array) -> Array:
+        # Stride uses `1 - cos(pi/2 * index/(ramp-1))` near the edge and 1
+        # elsewhere. Distances beyond the ramp zone are fully preserved.
+        scaled = dist / float(ramp - 1)
+        edge_val = 1.0 - jnp.cos(0.5 * jnp.pi * jnp.clip(scaled, 0.0, 1.0))
+        return jnp.where(dist < ramp, edge_val, 1.0)
+
+    tx = taper_from_dist(dist_x).astype(dtype)
+    ty = taper_from_dist(dist_y).astype(dtype)
+    return tx[:, None] * ty[None, :]
+
+
 def process_global_gradient_stride_like(
     grad: Array,
     *,
     damping_cells: int,
     model: Array | None = None,
     mask_grad: bool = True,
+    mask_rampoff: int = 10,
     smooth_grad: bool = True,
     smooth_sigma: float = 0.25,
     smooth_radius: int = 2,
@@ -100,7 +124,7 @@ def process_global_gradient_stride_like(
     - `norm_field`
 
     We reproduce the same high-level behaviour in pure JAX:
-    - mask: zero gradient in the outer absorbing frame
+    - mask: Stride-like interior mask with cosine ramp-off
     - smooth: apply Stride-like Gaussian smoothing (`smooth_sigma=0.25`) by
       default, with a legacy box-filter fallback when sigma is non-positive
     - norm: scale by max absolute amplitude, then apply Stride's
@@ -111,13 +135,18 @@ def process_global_gradient_stride_like(
 
     if mask_grad:
         cells = max(int(damping_cells), 0)
+        interior = jnp.ones_like(processed)
         if cells > 0:
-            mask = jnp.ones_like(processed)
-            mask = mask.at[:cells, :].set(0.0)
-            mask = mask.at[-cells:, :].set(0.0)
-            mask = mask.at[:, :cells].set(0.0)
-            mask = mask.at[:, -cells:].set(0.0)
-            processed = processed * mask
+            interior = interior.at[:cells, :].set(0.0)
+            interior = interior.at[-cells:, :].set(0.0)
+            interior = interior.at[:, :cells].set(0.0)
+            interior = interior.at[:, -cells:].set(0.0)
+        ramp = _stride_like_mask_rampoff(
+            (processed.shape[0], processed.shape[1]),
+            mask_rampoff,
+            processed.dtype,
+        )
+        processed = processed * interior * ramp
 
     if smooth_grad:
         if float(smooth_sigma) > 0.0:

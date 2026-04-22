@@ -162,6 +162,8 @@ class SolverConfig:
     `smooth_sigma` (default `0.25` cells) used by `SmoothField`.
     `grad_smooth_radius` is retained as a legacy fallback for runs that still
     use the previous box-filter approximation.
+    `grad_mask_rampoff` mirrors Stride's `MaskField(mask_rampoff=10)` soft edge
+    taper used during gradient masking.
     `grad_norm_guess_change` mirrors Stride's `norm_guess_change` used by
     `NormField`: after max-amplitude normalisation, gradients are rescaled by
     `mid_model * grad_norm_guess_change / 100`. This is an important part of
@@ -210,6 +212,7 @@ class SolverConfig:
     diff_source: bool = False
     stride_grad_processing: bool = True
     mask_grad: bool = True
+    grad_mask_rampoff: int = 10
     smooth_grad: bool = True
     norm_grad: bool = True
     grad_smooth_sigma: float = 0.25

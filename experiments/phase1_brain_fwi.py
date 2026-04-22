@@ -195,6 +195,12 @@ def parse_args():
         help="Zero gradients in the absorbing frame before applying the update.",
     )
     parser.add_argument(
+        "--grad-mask-rampoff",
+        type=int,
+        default=10,
+        help="Stride-like MaskField cosine ramp width in cells.",
+    )
+    parser.add_argument(
         "--smooth-grad",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -384,6 +390,7 @@ def build_config(args) -> BrainFWIConfig:
             damping_velocity_scale=args.damping_velocity_scale,
             stride_grad_processing=args.stride_grad_processing,
             mask_grad=args.mask_grad,
+            grad_mask_rampoff=args.grad_mask_rampoff,
             smooth_grad=args.smooth_grad,
             norm_grad=args.norm_grad,
             grad_smooth_sigma=args.grad_smooth_sigma,
@@ -1010,6 +1017,7 @@ def main():
                 damping_cells=config.solver.damping_cells,
                 model=model,
                 mask_grad=config.solver.mask_grad,
+                mask_rampoff=config.solver.grad_mask_rampoff,
                 smooth_grad=config.solver.smooth_grad,
                 smooth_sigma=config.solver.grad_smooth_sigma,
                 smooth_radius=config.solver.grad_smooth_radius,
@@ -1115,6 +1123,7 @@ def main():
         )
         metrics["stride_grad_processing"] = config.solver.stride_grad_processing
         metrics["mask_grad"] = config.solver.mask_grad
+        metrics["grad_mask_rampoff"] = config.solver.grad_mask_rampoff
         metrics["smooth_grad"] = config.solver.smooth_grad
         metrics["norm_grad"] = config.solver.norm_grad
         metrics["grad_smooth_sigma"] = config.solver.grad_smooth_sigma
@@ -1245,8 +1254,9 @@ def main():
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(
-            "Grad pipeline (mask/smooth/norm, sigma, radius, norm_guess_change, global_norm): "
+            "Grad pipeline (mask/rampoff/smooth/norm, sigma, radius, norm_guess_change, global_norm): "
             f"{config.solver.mask_grad}/"
+            f"{config.solver.grad_mask_rampoff}/"
             f"{config.solver.smooth_grad}/"
             f"{config.solver.norm_grad}, "
             f"{config.solver.grad_smooth_sigma}, "

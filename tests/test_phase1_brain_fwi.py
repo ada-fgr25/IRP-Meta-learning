@@ -720,6 +720,25 @@ class Phase1BrainFWITests(unittest.TestCase):
         # smoothing path, not accidentally identical to the Gaussian one.
         self.assertFalse(bool(jnp.allclose(gaussian, box)))
 
+    def test_stride_like_gradient_mask_uses_soft_rampoff(self):
+        """MaskField parity should apply a cosine ramp near domain edges."""
+
+        grad = jnp.ones((9, 9), dtype=jnp.float32)
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=True,
+            mask_rampoff=4,
+            smooth_grad=False,
+            norm_grad=False,
+        )
+
+        self.assertEqual(processed.shape, grad.shape)
+        self.assertTrue(bool(jnp.isclose(processed[0, 0], 0.0)))
+        self.assertTrue(bool(jnp.isclose(processed[4, 4], 1.0)))
+        self.assertGreater(float(processed[1, 1]), 0.0)
+        self.assertLess(float(processed[1, 1]), 1.0)
+
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""
 
