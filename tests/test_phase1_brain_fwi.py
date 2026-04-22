@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from experiments.phase1_brain_fwi import _build_random_shot_schedule
 from fwi.acoustics import (
     _apply_stride_like_time_window,
+    _process_trace_pair_for_stride_misfit,
     _build_boundary_terms,
     _prepare_source_wavelet,
     _source_scale,
@@ -389,6 +390,53 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(loss_value), 0.0)
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
         self.assertEqual(grad.shape, modelled.shape)
+
+    def test_scale_per_shot_path_accepts_raw_observed_reference(self):
+        """ScalePerShot branch should execute with an explicit raw reference."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_scale_per_shot=True,
+                source_window_enabled=False,
+            ),
+        )
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed_processed = jnp.full_like(modelled, 0.5)
+        observed_raw = jnp.full_like(modelled, 2.0)
+
+        with_raw_ref = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed_processed,
+            observed_raw,
+            config,
+            f_max_hz=2.0e5,
+        )
+        without_raw_ref = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed_processed,
+            None,
+            config,
+            f_max_hz=2.0e5,
+        )
+
+        self.assertEqual(with_raw_ref[0].shape, modelled.shape)
+        self.assertEqual(with_raw_ref[1].shape, modelled.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(with_raw_ref[0]))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(with_raw_ref[1]))))
+        # With Stride's default `relative_scale=True`, ScalePerShot is
+        # effectively neutral in amplitude, so both reference choices should
+        # remain numerically close in this synthetic setup.
+        self.assertTrue(bool(jnp.allclose(with_raw_ref[0], without_raw_ref[0])))
+        self.assertTrue(bool(jnp.allclose(with_raw_ref[1], without_raw_ref[1])))
 
     def test_stride_like_time_window_applies_across_trace_axis(self):
         """Configured source window should also apply to adjoint/source traces."""

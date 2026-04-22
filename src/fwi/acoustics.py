@@ -657,6 +657,7 @@ def _process_observed_shot_for_stride_misfit(
 def _process_trace_pair_for_stride_misfit(
     modelled_shot: jnp.ndarray,
     observed_shot: jnp.ndarray,
+    observed_scale_reference: jnp.ndarray | None,
     config: BrainFWIConfig,
     f_max_hz: float | None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -695,8 +696,13 @@ def _process_trace_pair_for_stride_misfit(
     observed = _stride_like_norm_per_shot(observed)
 
     if config.solver.stride_trace_scale_per_shot:
-        modelled = _stride_like_scale_per_shot(modelled, observed_shot)
-        observed = _stride_like_scale_per_shot(observed, observed_shot)
+        scale_to = (
+            observed_shot
+            if observed_scale_reference is None
+            else observed_scale_reference
+        )
+        modelled = _stride_like_scale_per_shot(modelled, scale_to)
+        observed = _stride_like_scale_per_shot(observed, scale_to)
 
     return modelled, observed
 
@@ -717,6 +723,7 @@ def shot_loss_from_traces(
     modelled_processed, observed_processed = _process_trace_pair_for_stride_misfit(
         modelled_shot,
         observed_preprocessed,
+        observed_shot,
         config,
         f_max_hz,
     )
