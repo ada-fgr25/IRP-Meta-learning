@@ -533,6 +533,60 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(muted_pair[0], 0.0)))
         self.assertTrue(bool(jnp.allclose(unmuted_pair[0], modelled)))
 
+    def test_trace_pipeline_optional_time_weighting_changes_loss(self):
+        """Optional time weighting should alter the shot loss when enabled."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        weighted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                stride_trace_filter_traces=False,
+                stride_trace_mute_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=True,
+                stride_trace_time_weight_power=1.0,
+                stride_trace_time_weight_start=0,
+                stride_trace_time_weight_stop=base.time.nt,
+            ),
+        )
+        unweighted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                stride_trace_filter_traces=False,
+                stride_trace_mute_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=False,
+            ),
+        )
+
+        weighted_loss = shot_loss_from_traces(modelled, observed, weighted_config, None)
+        unweighted_loss = shot_loss_from_traces(
+            modelled, observed, unweighted_config, None
+        )
+
+        self.assertGreater(float(unweighted_loss), 0.0)
+        self.assertGreater(float(weighted_loss), 0.0)
+        self.assertNotEqual(float(weighted_loss), float(unweighted_loss))
+
     def test_wavelet_preprocess_respects_wavelet_relaxation(self):
         """ProcessWavelets filter should reflect wavelet-side relaxation."""
 

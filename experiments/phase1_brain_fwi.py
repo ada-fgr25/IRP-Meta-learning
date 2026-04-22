@@ -300,6 +300,30 @@ def parse_args():
         help="Enable Stride-like optional scale_per_shot trace scaling.",
     )
     parser.add_argument(
+        "--stride-trace-time-weighting",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable optional Stride-like time weighting in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-power",
+        type=float,
+        default=1.0,
+        help="Exponent for optional Stride-like time-weight ramp.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-start",
+        type=int,
+        default=0,
+        help="Inclusive start sample for optional time weighting.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-stop",
+        type=int,
+        default=None,
+        help="Exclusive stop sample for optional time weighting (default: nt).",
+    )
+    parser.add_argument(
         "--max-freqs-hz",
         type=str,
         default="100000,200000,300000",
@@ -440,6 +464,10 @@ def build_config(args) -> BrainFWIConfig:
             stride_trace_mute_traces=args.stride_trace_mute_traces,
             stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
+            stride_trace_time_weighting=args.stride_trace_time_weighting,
+            stride_trace_time_weight_power=args.stride_trace_time_weight_power,
+            stride_trace_time_weight_start=args.stride_trace_time_weight_start,
+            stride_trace_time_weight_stop=args.stride_trace_time_weight_stop,
             trace_filter_relaxation_wavelets=args.trace_filter_relaxation_wavelets,
             trace_filter_relaxation_traces=args.trace_filter_relaxation_traces,
         ),
@@ -1191,6 +1219,18 @@ def main():
         metrics["stride_trace_scale_per_shot"] = (
             config.solver.stride_trace_scale_per_shot
         )
+        metrics["stride_trace_time_weighting"] = (
+            config.solver.stride_trace_time_weighting
+        )
+        metrics["stride_trace_time_weight_power"] = (
+            config.solver.stride_trace_time_weight_power
+        )
+        metrics["stride_trace_time_weight_start"] = (
+            config.solver.stride_trace_time_weight_start
+        )
+        metrics["stride_trace_time_weight_stop"] = (
+            config.solver.stride_trace_time_weight_stop
+        )
         metrics["stride_grad_processing"] = config.solver.stride_grad_processing
         metrics["mask_grad"] = config.solver.mask_grad
         metrics["grad_mask_rampoff"] = config.solver.grad_mask_rampoff
@@ -1323,18 +1363,25 @@ def main():
             f"{config.solver.damping_cells}"
         )
         print(
-            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale): "
+            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale/time_weight): "
             f"{config.solver.stride_trace_processing}/"
             f"{config.solver.stride_trace_filter_wavelets}/"
             f"{config.solver.stride_trace_filter_traces}/"
             f"{config.solver.stride_trace_mute_traces}/"
             f"{config.solver.stride_trace_norm_per_shot}/"
-            f"{config.solver.stride_trace_scale_per_shot}"
+            f"{config.solver.stride_trace_scale_per_shot}/"
+            f"{config.solver.stride_trace_time_weighting}"
         )
         print(
             "Trace relaxations (wavelets/traces): "
             f"{config.solver.trace_filter_relaxation_wavelets}/"
             f"{config.solver.trace_filter_relaxation_traces}"
+        )
+        print(
+            "Time-weighting (power/start/stop): "
+            f"{config.solver.stride_trace_time_weight_power}/"
+            f"{config.solver.stride_trace_time_weight_start}/"
+            f"{config.solver.stride_trace_time_weight_stop}"
         )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(

@@ -605,6 +605,52 @@ def _stride_like_scale_per_shot(
     return traces * norm_scale_to / relative_scale
 
 
+def _stride_like_time_weights(
+    n_time: int,
+    config: BrainFWIConfig,
+    dtype,
+) -> jnp.ndarray:
+    """Build optional Stride-like time weights for one shot gather.
+
+    The tracked Stride version in this repository keeps `_time_weights()` as a
+    no-op (`1.`), but `ProcessTraces` exposes an optional `time_weighting`
+    stage in other configurations/versions. We provide a differentiable JAX
+    analogue here so parity experiments can enable it explicitly.
+    """
+
+    n_time = max(int(n_time), 0)
+    if n_time <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    start_idx = max(int(config.solver.stride_trace_time_weight_start), 0)
+    stop_cfg = config.solver.stride_trace_time_weight_stop
+    stop_idx = n_time if stop_cfg is None else min(max(int(stop_cfg), 0), n_time)
+    if stop_idx <= start_idx:
+        return jnp.ones((n_time,), dtype=dtype)
+
+    weights = jnp.ones((n_time,), dtype=dtype)
+    window_len = stop_idx - start_idx
+    if window_len <= 1:
+        return weights
+
+    power = max(float(config.solver.stride_trace_time_weight_power), 0.0)
+    ramp = jnp.linspace(0.0, 1.0, window_len, dtype=dtype) ** power
+    return weights.at[start_idx:stop_idx].set(ramp)
+
+
+def _apply_stride_like_time_weighting(
+    traces: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Apply optional Stride-like time weighting to `[time, receiver]` traces."""
+
+    if not config.solver.stride_trace_time_weighting:
+        return traces
+
+    weights = _stride_like_time_weights(traces.shape[0], config, traces.dtype)
+    return traces * weights[:, None]
+
+
 def _stride_like_mute_modelled(
     modelled: jnp.ndarray,
     observed: jnp.ndarray,
@@ -747,6 +793,10 @@ def _process_trace_pair_for_stride_misfit(
         )
         modelled = _stride_like_scale_per_shot(modelled, scale_to)
         observed = _stride_like_scale_per_shot(observed, scale_to)
+
+    if config.solver.stride_trace_time_weighting:
+        modelled = _apply_stride_like_time_weighting(modelled, config)
+        observed = _apply_stride_like_time_weighting(observed, config)
 
     return modelled, observed
 

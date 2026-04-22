@@ -192,6 +192,11 @@ class SolverConfig:
     `stride_trace_scale_per_shot` mirror the corresponding optional
     `ProcessTraces` steps. The default benchmark path keeps mute+norm enabled
     and scale disabled.
+    `stride_trace_time_weighting` adds an optional differentiable time-weight
+    stage in the misfit path to emulate Stride's optional `time_weighting`
+    pipeline hook. Weighting is controlled by
+    `stride_trace_time_weight_power`, `stride_trace_time_weight_start`, and
+    `stride_trace_time_weight_stop`.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -243,6 +248,10 @@ class SolverConfig:
     stride_trace_mute_traces: bool = True
     stride_trace_norm_per_shot: bool = True
     stride_trace_scale_per_shot: bool = False
+    stride_trace_time_weighting: bool = False
+    stride_trace_time_weight_power: float = 1.0
+    stride_trace_time_weight_start: int = 0
+    stride_trace_time_weight_stop: int | None = None
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1
     grad_shot_batch_size: int = 1
