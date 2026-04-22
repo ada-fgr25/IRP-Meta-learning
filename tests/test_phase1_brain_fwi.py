@@ -1038,18 +1038,26 @@ class Phase1BrainFWITests(unittest.TestCase):
     def test_sponge2_subdomain_masks_split_interior_and_boundary(self):
         """Sponge2 masks should partition zero-damp and damped subdomains."""
 
-        damp = jnp.asarray(
-            [
-                [0.2, 0.1, 0.2],
-                [0.1, 0.0, 0.1],
-                [0.2, 0.1, 0.2],
-            ],
-            dtype=jnp.float32,
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=1),
         )
-        interior, boundary = _sponge2_subdomain_masks(damp, jnp.float32)
+        interior, boundary = _sponge2_subdomain_masks(
+            config,
+            (config.grid.nx, config.grid.ny),
+            jnp.float32,
+        )
 
-        self.assertTrue(bool(jnp.isclose(interior[1, 1], 1.0)))
-        self.assertTrue(bool(jnp.isclose(boundary[1, 1], 0.0)))
+        self.assertTrue(
+            bool(jnp.isclose(interior[config.grid.nx // 2, config.grid.ny // 2], 1.0))
+        )
+        self.assertTrue(
+            bool(jnp.isclose(boundary[config.grid.nx // 2, config.grid.ny // 2], 0.0))
+        )
         self.assertTrue(bool(jnp.isclose(interior[0, 0], 0.0)))
         self.assertTrue(bool(jnp.isclose(boundary[0, 0], 1.0)))
         self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
