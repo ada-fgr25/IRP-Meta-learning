@@ -2006,11 +2006,25 @@ def loss_and_grad(
         shot_batch, observed_batch, active_mask = xs
         batch_losses, batch_grads = jax.vmap(shot_loss_grad)(shot_batch, observed_batch)
 
-        active_loss = active_mask.astype(batch_losses.dtype)
-        active_grad = active_mask.astype(batch_grads.dtype)[:, None, None]
+        # Inactive tail entries come from padding the final partial batch.
+        # Their forward/adjoint solve can still produce NaNs (for example if a
+        # processing step normalises an all-zero synthetic gather). Applying a
+        # multiplicative 0/1 mask is not sufficient because `0 * NaN = NaN`.
+        # We therefore explicitly select zeros for inactive entries before the
+        # reduction so masked tails are guaranteed to be numerically inert.
+        masked_losses = jnp.where(
+            active_mask,
+            batch_losses,
+            jnp.zeros_like(batch_losses),
+        )
+        masked_grads = jnp.where(
+            active_mask[:, None, None],
+            batch_grads,
+            jnp.zeros_like(batch_grads),
+        )
         return (
-            total_loss + jnp.sum(batch_losses * active_loss),
-            total_grad + jnp.sum(batch_grads * active_grad, axis=0),
+            total_loss + jnp.sum(masked_losses),
+            total_grad + jnp.sum(masked_grads, axis=0),
         ), None
 
     init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))
