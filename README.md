@@ -183,11 +183,23 @@ On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-
 
 Side-by-side comparison of the true model, starting model, and final recovered model after 24 steps, plus difference maps. This is the quickest visual check for whether inversion recovers skull/brain structure and whether updates move in the expected direction.
 
+Observed outcome from this run:
+
+* The inversion clearly updates the **interior brain region** away from the smooth start and in the correct direction, but recovery is still **incomplete** after 24 steps.
+* The **skull/high-contrast boundary** is recovered more strongly than deep interior details, which is expected in early/intermediate FWI stages and indicates a boundary-dominated sensitivity pattern.
+* The `True - Final` map shows residual structure inside the head, confirming meaningful progress with remaining model mismatch that likely needs longer runs and/or stronger interior-focused conditioning.
+
 #### Figure 2: Phase 1 Optimisation History (`sgd_history.png`)
 
 ![Phase 1 History](image-1.png)
 
 Per-stage optimisation curves (loss and RMSE when available). Since the objective changes across continuation stages, this plot is best interpreted for monotonicity and stability *within* each stage rather than by directly comparing raw loss values across stages.
+
+Observed outcome from this run:
+
+* **RMSE decreases consistently in all three stages**, showing steady model improvement over the full continuation schedule (about `47.2 -> 35.0 -> 33.4` by stage endpoints).
+* **Loss is smooth in Stage 0** (low-frequency regime), then becomes more oscillatory in Stages 1-2 as higher frequencies are introduced and shot subsets vary per iteration.
+* The combination of oscillatory loss with still-decreasing RMSE is consistent with **useful but noisy high-frequency updates**: the inversion keeps improving the model overall, even when per-step misfit is non-monotonic.
 
 Runtime troubleshooting:
 
