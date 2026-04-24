@@ -175,15 +175,15 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 
 ### Representative Full Run Snapshot
 
-For a complete Phase 1 parity-oriented run, see:
-
-* `experiments/outputs/ab_stride_parity_full24/sgd_reconstruction.png`
-* `experiments/outputs/ab_stride_parity_full24/sgd_history.png`
-
 On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-scale grid and acquisition) took about **8 hours 19 minutes** wall-clock time.
 
 ![Phase 1 Reconstruction](experiments/outputs/ab_stride_parity_full24/sgd_reconstruction.png)
 ![Phase 1 History](experiments/outputs/ab_stride_parity_full24/sgd_history.png)
+
+What these show:
+
+* **Reconstruction panel (`sgd_reconstruction.png`)**: side-by-side comparison of the true model, starting model, and final recovered model after 24 steps, plus difference maps. This is the quickest visual check for whether inversion is recovering skull/brain structure and whether the update moved in the right direction.
+* **History panel (`sgd_history.png`)**: per-stage optimisation curves (loss, and RMSE when available). Because the objective changes across continuation stages, this plot is most useful for checking monotonicity and stability *within* each stage rather than comparing raw loss values across stages.
 
 Runtime troubleshooting:
 
