@@ -349,6 +349,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--shot-reduction",
+        choices=["sum", "mean"],
+        default="sum",
+        help=(
+            "How to reduce multi-shot loss/gradient contributions each step. "
+            "'sum' matches Stride update scaling."
+        ),
+    )
+    parser.add_argument(
         "--final-shots",
         type=int,
         default=None,
@@ -437,6 +446,7 @@ def build_config(args) -> BrainFWIConfig:
             checkpoint_interval=args.checkpoint_interval,
             forward_shot_batch_size=args.forward_shot_batch_size,
             grad_shot_batch_size=args.grad_shot_batch_size,
+            shot_reduction=args.shot_reduction,
             source_window_enabled=args.source_window_enabled,
             source_window_alpha=args.source_window_alpha,
             source_window_start=args.source_window_start,
@@ -1182,6 +1192,7 @@ def main():
         metrics["checkpoint_interval"] = config.solver.checkpoint_interval
         metrics["forward_shot_batch_size"] = config.solver.forward_shot_batch_size
         metrics["grad_shot_batch_size"] = config.solver.grad_shot_batch_size
+        metrics["shot_reduction"] = config.solver.shot_reduction
         metrics["damping_mode"] = config.solver.damping_mode
         metrics["damping_type"] = config.solver.damping_type
         metrics["damping_cells"] = config.solver.damping_cells
@@ -1349,6 +1360,7 @@ def main():
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
         print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
         print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
+        print(f"Shot reduction mode: {config.solver.shot_reduction}")
         print(
             "Source window (enabled/alpha/start/stop): "
             f"{config.solver.source_window_enabled}/"

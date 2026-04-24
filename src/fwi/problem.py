@@ -207,7 +207,12 @@ def loss(params, x, auxs):
             f_max_hz,
         )
     )(y, y_obs)
-    return jnp.sum(per_shot_losses).reshape((1,))
+    reduction = params["config"].solver.shot_reduction
+    if reduction == "sum":
+        return jnp.sum(per_shot_losses).reshape((1,))
+    if reduction == "mean":
+        return jnp.mean(per_shot_losses).reshape((1,))
+    raise ValueError(f"Unsupported shot_reduction '{reduction}'. Use 'sum' or 'mean'.")
 
 
 def smooth_traces(traces: jnp.ndarray, radius: int) -> jnp.ndarray:

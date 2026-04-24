@@ -742,6 +742,53 @@ class Phase1BrainFWITests(unittest.TestCase):
             bool(jnp.allclose(grad_batch, grad_seq, rtol=1.0e-5, atol=1.0e-6))
         )
 
+    def test_shot_reduction_mean_scales_loss_and_gradient_by_shot_count(self):
+        """Mean reduction should scale additive shot terms by `1 / n_shots`."""
+
+        base = _tiny_config()
+        sum_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, shot_reduction="sum"),
+        )
+        mean_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, shot_reduction="mean"),
+        )
+        params_sum = init_params(jax.random.PRNGKey(0), config=sum_config)
+        params_mean = init_params(jax.random.PRNGKey(0), config=mean_config)
+
+        n_shots = params_sum["y_obs"].shape[0]
+        loss_sum, grad_sum = loss_and_grad(
+            params_sum["x0"],
+            params_sum["acquisition"],
+            params_sum["config"],
+            params_sum["medium"],
+            params_sum["y_obs"],
+            shot_batch_size=2,
+        )
+        loss_mean, grad_mean = loss_and_grad(
+            params_mean["x0"],
+            params_mean["acquisition"],
+            params_mean["config"],
+            params_mean["medium"],
+            params_mean["y_obs"],
+            shot_batch_size=2,
+        )
+
+        expected_scale = 1.0 / float(n_shots)
+        self.assertTrue(
+            bool(jnp.allclose(loss_mean, loss_sum * expected_scale, rtol=1.0e-6))
+        )
+        self.assertTrue(
+            bool(jnp.allclose(grad_mean, grad_sum * expected_scale, rtol=1.0e-5))
+        )
+
     def test_explicit_adjoint_supports_higher_order_differentiation(self):
         """Meta-gradients should stay available through the explicit adjoint."""
 

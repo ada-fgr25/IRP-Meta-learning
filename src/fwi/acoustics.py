@@ -1566,6 +1566,30 @@ def _normalise_shot_batch_size(
     return min(batch_size, max(total_shots, 1))
 
 
+def _apply_shot_reduction(
+    total_loss: jnp.ndarray,
+    total_grad: jnp.ndarray,
+    n_selected_shots: int,
+    reduction: str,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Apply the configured reduction across selected shots.
+
+    Stride's optimisation loop uses additive shot accumulation, so `sum` is the
+    parity-preserving default. We also expose a `mean` mode explicitly because
+    some experiments prefer update magnitudes that are invariant to the number
+    of selected shots in each iteration.
+    """
+
+    if reduction == "sum":
+        return total_loss, total_grad
+    if reduction == "mean":
+        scale = 1.0 / float(max(int(n_selected_shots), 1))
+        return total_loss * scale, total_grad * scale
+    raise ValueError(
+        "Unsupported shot_reduction " f"'{reduction}'. Use 'sum' or 'mean'."
+    )
+
+
 def _replay_segment_history(
     start_carry: tuple[jnp.ndarray, jnp.ndarray],
     source_index: jnp.ndarray,
@@ -1974,7 +1998,12 @@ def loss_and_grad(
             init,
             (active_shot_indices, observed_data),
         )
-        return total_loss, total_grad
+        return _apply_shot_reduction(
+            total_loss,
+            total_grad,
+            total_shots,
+            config.solver.shot_reduction,
+        )
 
     # Batched shot accumulation improves throughput by evaluating several
     # independent shot forward+adjoint solves together, while masking the tail
@@ -2033,4 +2062,9 @@ def loss_and_grad(
         init,
         (batched_shot_indices, batched_observed, batched_active_mask),
     )
-    return total_loss, total_grad
+    return _apply_shot_reduction(
+        total_loss,
+        total_grad,
+        total_shots,
+        config.solver.shot_reduction,
+    )

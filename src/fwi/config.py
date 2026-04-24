@@ -206,6 +206,12 @@ class SolverConfig:
     `grad_shot_batch_size` controls shot-level batching for the forward+adjoint
     gradient path. `1` keeps the most conservative sequential accumulation.
     Higher values can improve throughput when memory headroom allows.
+    `shot_reduction` controls how multi-shot objectives are reduced before the
+    optimiser update:
+    - `sum`: Stride-style additive objective (`0.5 * sum(r^2)` per shot, then
+      summed across selected shots)
+    - `mean`: average over selected shots; useful for experiments where update
+      magnitude should be less sensitive to shot-count changes.
     """
 
     damping_cells: int = 40
@@ -255,6 +261,7 @@ class SolverConfig:
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1
     grad_shot_batch_size: int = 1
+    shot_reduction: str = "sum"
 
 
 @dataclass(frozen=True)
