@@ -286,6 +286,12 @@ survey setup through the same shared acquisition API used by the JAX path. That
 makes it easier to write experiment code that can swap between the research
 solver and the benchmark reference without changing all of its bookkeeping.
 
+Representative timing for `--mode both` (from `experiments/outputs/stride_benchmark/run_full/stride_benchmark_summary.json` on our CPU setup):
+
+* forward: `37.89 s`
+* inverse: `4057.04 s` (about `67 min 37 s`)
+* total: `4094.93 s` (about `68 min 15 s`)
+
 #### Figure 3: Stride Benchmark Reconstruction (`stride_reconstruction.png`)
 
 ![Stride Reconstruction](assets/images/phase1_stride_benchmark_reconstruction.png)
@@ -294,6 +300,12 @@ True model, starting model, and latest recovered Stride snapshot, plus
 difference maps. This is the Stride-side counterpart to the JAX reconstruction
 figure for visual parity checks.
 
+Observed outcome from this run:
+
+* The recovered Stride model clearly moves the interior in the correct direction from the smooth start.
+* As with the JAX run, the skull/high-contrast boundary is recovered more strongly than fine interior detail at this stage.
+* The `True - Recovered` panel still shows non-trivial interior residuals, so the result is a meaningful but not fully converged recovery.
+
 #### Figure 4: Stride Benchmark History (`stride_history.png`)
 
 ![Stride History](assets/images/phase1_stride_benchmark_history.png)
@@ -301,6 +313,12 @@ figure for visual parity checks.
 Stage-wise Stride history with top-row loss (parsed from `head.log`) and
 bottom-row model RMSE (computed from saved `alpha2D-Vp-*.h5` snapshots), so it
 can be compared directly to the JAX history panel style.
+
+Observed outcome from this run:
+
+* Stage-wise losses are non-monotonic (especially in higher-frequency stages), which is expected with random shot subsets and continuation transitions.
+* RMSE improves across stages overall, ending around `39.75` by stage 2 iteration 8.
+* The history pattern is qualitatively similar to the JAX run: noisy per-step objective behavior with consistent long-horizon model improvement.
 
 Replication note:
 
