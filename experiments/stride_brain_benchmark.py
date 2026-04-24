@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 from time import perf_counter
 
 import h5py
@@ -181,6 +182,162 @@ def _save_model_snapshot_figure(
     }
 
 
+def _parse_stride_iteration_losses(
+    head_log_path: Path,
+    *,
+    num_blocks: int,
+    num_iters_per_block: int,
+) -> list[list[float]]:
+    """Extract per-iteration total losses from Stride head logs.
+
+    Stride logs lines such as:
+    `Done iteration 3 (out of 8), block 1 (out of 3) - Total loss 1.076364e+02`
+    We parse those lines into stage-indexed loss sequences.
+    """
+
+    losses_by_stage = [[] for _ in range(max(int(num_blocks), 0))]
+    if not head_log_path.exists():
+        return losses_by_stage
+
+    pattern = re.compile(
+        r"Done iteration\s+(\d+)\s+\(out of\s+(\d+)\),\s+block\s+(\d+)\s+\(out of\s+(\d+)\)\s+-\s+Total loss\s+([0-9eE+\-.]+)"
+    )
+    with head_log_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = pattern.search(line)
+            if match is None:
+                continue
+            block_index = int(match.group(3)) - 1
+            if block_index < 0 or block_index >= len(losses_by_stage):
+                continue
+            losses_by_stage[block_index].append(float(match.group(5)))
+
+    # Keep stage lengths aligned with the configured script schedule.
+    expected_len = max(int(num_iters_per_block), 0)
+    if expected_len > 0:
+        losses_by_stage = [stage[:expected_len] for stage in losses_by_stage]
+    return losses_by_stage
+
+
+def _rmse(a: np.ndarray, b: np.ndarray) -> float:
+    """Return root-mean-square error between two model arrays."""
+
+    return float(np.sqrt(np.mean((a - b) ** 2)))
+
+
+def _stagewise_rmse_history(
+    true_model: np.ndarray,
+    snapshots: list[Path],
+    *,
+    num_blocks: int,
+    num_iters_per_block: int,
+) -> list[list[float]]:
+    """Build stage-wise RMSE history from saved Stride velocity snapshots."""
+
+    per_iter_rmse = [
+        _rmse(_load_stride_scalar_field(path), true_model) for path in snapshots
+    ]
+    losses_by_stage = [[] for _ in range(max(int(num_blocks), 0))]
+    for stage_index in range(len(losses_by_stage)):
+        start = stage_index * int(num_iters_per_block)
+        stop = (stage_index + 1) * int(num_iters_per_block)
+        losses_by_stage[stage_index] = per_iter_rmse[start:stop]
+    return losses_by_stage
+
+
+def _save_stride_history_figure(
+    runner: StrideBenchmarkRunner,
+    output_dir: Path,
+    *,
+    true_model_path: Path | None = None,
+) -> dict[str, object]:
+    """Save a Stride-side analogue of the JAX stage-wise history plot.
+
+    Top row: per-stage Stride total loss (from `mosaic-workspace/head.log`).
+    Bottom row: per-stage model RMSE (from `alpha2D-Vp-*.h5` snapshots).
+    """
+
+    true_model_path = (
+        Path("data/alpha2D-TrueModel.h5").resolve()
+        if true_model_path is None
+        else true_model_path.resolve()
+    )
+    true_model = _load_stride_scalar_field(true_model_path)
+    snapshots = runner.list_velocity_snapshots()
+    settings = runner.reference_settings()
+    num_blocks = int(settings["inverse_num_blocks"])
+    num_iters_per_block = int(settings["inverse_num_iters_per_block"])
+
+    # Parse losses from Stride head logs when available.
+    head_log_path = runner.layout.resource_dir / "mosaic-workspace" / "head.log"
+    stage_losses = _parse_stride_iteration_losses(
+        head_log_path,
+        num_blocks=num_blocks,
+        num_iters_per_block=num_iters_per_block,
+    )
+    stage_rmse = _stagewise_rmse_history(
+        true_model,
+        snapshots,
+        num_blocks=num_blocks,
+        num_iters_per_block=num_iters_per_block,
+    )
+
+    figure, axes = plt.subplots(
+        2, num_blocks, figsize=(4.5 * num_blocks, 8), squeeze=False
+    )
+    for stage_index in range(num_blocks):
+        loss_ax = axes[0][stage_index]
+        losses = stage_losses[stage_index]
+        if losses:
+            steps = list(range(len(losses)))
+            loss_ax.plot(steps, losses, marker="o", linewidth=1.5)
+            loss_ax.set_yscale("log")
+        else:
+            loss_ax.text(
+                0.5,
+                0.5,
+                "No loss log found",
+                transform=loss_ax.transAxes,
+                ha="center",
+                va="center",
+            )
+        loss_ax.set_title(f"Stage {stage_index} loss")
+        loss_ax.set_xlabel("Step within stage")
+        loss_ax.set_ylabel("Loss")
+        loss_ax.grid(True, alpha=0.3)
+
+        rmse_ax = axes[1][stage_index]
+        rmses = stage_rmse[stage_index]
+        if rmses:
+            steps = list(range(len(rmses)))
+            rmse_ax.plot(steps, rmses, marker="o", linewidth=1.5)
+        else:
+            rmse_ax.text(
+                0.5,
+                0.5,
+                "No snapshots found",
+                transform=rmse_ax.transAxes,
+                ha="center",
+                va="center",
+            )
+        rmse_ax.set_title(f"Stage {stage_index} RMSE")
+        rmse_ax.set_xlabel("Step within stage")
+        rmse_ax.set_ylabel("RMSE")
+        rmse_ax.grid(True, alpha=0.3)
+
+    figure.tight_layout()
+    history_path = output_dir / "stride_history.png"
+    figure.savefig(history_path, dpi=150)
+    plt.close(figure)
+
+    return {
+        "stride_history_png": str(history_path.resolve()),
+        "loss_by_stage": stage_losses,
+        "rmse_by_stage": stage_rmse,
+        "head_log_path": str(head_log_path.resolve()),
+    }
+
+
 def _summary(
     runner: StrideBenchmarkRunner,
     *,
@@ -195,6 +352,7 @@ def _summary(
     backend = build_backend("stride")
     acquisition = backend.build_acquisition(config=None)
     figures = _save_model_snapshot_figure(runner, output_dir)
+    history = _save_stride_history_figure(runner, output_dir)
     return {
         "resource_dir": str(runner.layout.resource_dir.resolve()),
         "mode": mode,
@@ -210,7 +368,12 @@ def _summary(
         "n_velocity_snapshots": len(snapshots),
         "latest_velocity_snapshot": str(snapshots[-1].resolve()) if snapshots else None,
         "timings_s": dict(timings_s),
-        "figures": figures,
+        "figures": {**figures, "stride_history_png": history["stride_history_png"]},
+        "history": {
+            "loss_by_stage": history["loss_by_stage"],
+            "rmse_by_stage": history["rmse_by_stage"],
+            "head_log_path": history["head_log_path"],
+        },
     }
 
 

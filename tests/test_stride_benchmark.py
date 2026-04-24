@@ -11,7 +11,9 @@ import numpy as np
 
 from experiments.stride_brain_benchmark import (
     _load_stride_scalar_field,
+    _parse_stride_iteration_losses,
     _save_model_snapshot_figure,
+    _save_stride_history_figure,
 )
 from fwi.backends import build_backend
 from fwi.stride_benchmark import StrideBenchmarkLayout, StrideBenchmarkRunner
@@ -165,6 +167,93 @@ class StrideBenchmarkTests(unittest.TestCase):
 
             self.assertIsNone(figure_outputs["stride_reconstruction_png"])
             self.assertIsNone(figure_outputs["recovered_model_path"])
+
+    def test_loss_parser_extracts_stagewise_totals_from_head_log(self):
+        """Stride head-log parsing should recover per-stage total-loss series."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "head.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "Done iteration 1 (out of 2), block 1 (out of 2) - Total loss 1.000000e+02",
+                        "Done iteration 2 (out of 2), block 1 (out of 2) - Total loss 8.000000e+01",
+                        "Done iteration 1 (out of 2), block 2 (out of 2) - Total loss 6.000000e+01",
+                        "Done iteration 2 (out of 2), block 2 (out of 2) - Total loss 4.000000e+01",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            losses = _parse_stride_iteration_losses(
+                log_path,
+                num_blocks=2,
+                num_iters_per_block=2,
+            )
+
+            self.assertEqual(losses, [[100.0, 80.0], [60.0, 40.0]])
+
+    def test_history_figure_writer_saves_stride_history_png(self):
+        """History writer should emit a Stride-stage loss/RMSE figure."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            resource_dir = root / "stride_resource"
+            output_dir = root / "outputs"
+            mosaic_workspace = resource_dir / "mosaic-workspace"
+            resource_dir.mkdir()
+            output_dir.mkdir()
+            mosaic_workspace.mkdir()
+
+            (resource_dir / "01_script_forward.py").write_text("", encoding="utf-8")
+            (resource_dir / "02_script_inverse.py").write_text("", encoding="utf-8")
+
+            # Create 24 snapshots to match the default 3 blocks x 8 iters layout.
+            for idx in range(1, 25):
+                snapshot_path = resource_dir / f"alpha2D-Vp-{idx:05d}.h5"
+                value = 1500.0 + idx
+                with h5py.File(snapshot_path, "w") as handle:
+                    handle.create_dataset(
+                        "data",
+                        data=np.full((2, 2), value, dtype=np.float32),
+                    )
+
+            # Minimal head.log with one loss per iteration.
+            loss_lines = []
+            for block in range(1, 4):
+                for iteration in range(1, 9):
+                    total_loss = float(1000 - (block - 1) * 100 - iteration)
+                    loss_lines.append(
+                        "Done iteration "
+                        f"{iteration} (out of 8), block {block} (out of 3) - "
+                        f"Total loss {total_loss:.6e}"
+                    )
+            (mosaic_workspace / "head.log").write_text(
+                "\n".join(loss_lines),
+                encoding="utf-8",
+            )
+
+            true_model_path = root / "true.h5"
+            with h5py.File(true_model_path, "w") as handle:
+                handle.create_dataset(
+                    "data",
+                    data=np.full((2, 2), 1500.0, dtype=np.float32),
+                )
+
+            runner = StrideBenchmarkRunner(
+                layout=StrideBenchmarkLayout(resource_dir=resource_dir),
+            )
+            history = _save_stride_history_figure(
+                runner,
+                output_dir,
+                true_model_path=true_model_path,
+            )
+
+            self.assertTrue(Path(history["stride_history_png"]).exists())
+            self.assertEqual(len(history["loss_by_stage"]), 3)
+            self.assertEqual(len(history["loss_by_stage"][0]), 8)
+            self.assertEqual(len(history["rmse_by_stage"]), 3)
+            self.assertEqual(len(history["rmse_by_stage"][0]), 8)
 
 
 if __name__ == "__main__":
