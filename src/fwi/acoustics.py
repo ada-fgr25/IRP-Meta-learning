@@ -387,15 +387,26 @@ def _sponge2_subdomain_masks(
     config: BrainFWIConfig,
     shape: tuple[int, int],
     dtype: jnp.dtype,
+    sponge_damp: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Derive explicit interior/boundary masks from Sponge2 damping.
 
     Devito runs separate interior and boundary stencils for the acoustic step,
     with the sponge damping term only active in absorbing subdomains selected by
     geometry. In JAX we mirror that structure by deriving binary masks directly
-    from the configured absorbing-frame width (`damping_cells`), avoiding
-    value-dependent branching so the update remains fully differentiable.
+    from either:
+    - the active damping field (`sponge_damp > 0`) when available, or
+    - the configured absorbing-frame width (`damping_cells`) as a fallback.
+
+    Using the damping field as the primary selector keeps subdomain activation
+    aligned with the actual runtime boundary term, which is closer to how
+    Devito's subdomain-specific boundary equations are activated.
     """
+
+    if sponge_damp is not None:
+        boundary = (jnp.abs(sponge_damp) > 0.0).astype(dtype)
+        interior = 1.0 - boundary
+        return interior, boundary
 
     nx, ny = shape
     cells = max(int(config.solver.damping_cells), 0)
@@ -1257,7 +1268,7 @@ def _propose_next_field(
         sponge_linear = velocity_sq * sponge_damp * config.time.dt
         sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
         interior_mask, boundary_subdomain_mask = _sponge2_subdomain_masks(
-            config, u_curr.shape, u_curr.dtype
+            config, u_curr.shape, u_curr.dtype, sponge_damp=sponge_damp
         )
 
         # Interior stencil: identical to the undamped second-order step.

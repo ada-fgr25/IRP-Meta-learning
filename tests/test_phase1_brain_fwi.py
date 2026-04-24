@@ -1247,6 +1247,29 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.isclose(boundary[0, 0], 1.0)))
         self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
 
+    def test_sponge2_subdomain_masks_can_follow_runtime_damping_field(self):
+        """Runtime sponge field should control boundary-mask activation."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=4),
+        )
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        _, sponge_damp = _build_boundary_terms(config, velocity)
+        interior, boundary = _sponge2_subdomain_masks(
+            config,
+            (config.grid.nx, config.grid.ny),
+            jnp.float32,
+            sponge_damp=sponge_damp,
+        )
+
+        self.assertTrue(bool(jnp.allclose(boundary, (jnp.abs(sponge_damp) > 0.0))))
+        self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
+
     def test_sponge2_default_reflection_matches_stride_width_rule(self):
         """Default reflection coefficient should follow Stride's width heuristic."""
 
