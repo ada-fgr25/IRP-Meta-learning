@@ -49,14 +49,72 @@ def _box_smooth_2d(field: Array, radius: int) -> Array:
     return col_smoothed_t.T
 
 
+def _gaussian_kernel_1d(sigma: float, dtype) -> Array:
+    """Build a compact 1D Gaussian kernel for separable smoothing."""
+
+    sigma = max(float(sigma), 0.0)
+    if sigma <= 0.0:
+        return jnp.ones((1,), dtype=dtype)
+
+    radius = max(int(np.ceil(3.0 * sigma)), 1)
+    offsets = jnp.arange(-radius, radius + 1, dtype=dtype)
+    kernel = jnp.exp(-0.5 * (offsets / sigma) ** 2)
+    return kernel / jnp.sum(kernel)
+
+
+def _gaussian_smooth_2d(field: Array, sigma: float) -> Array:
+    """Apply Stride-like nearest-boundary Gaussian smoothing in 2D."""
+
+    kernel = _gaussian_kernel_1d(sigma, field.dtype)
+    radius = (kernel.shape[0] - 1) // 2
+    if radius <= 0:
+        return field
+
+    def convolve_1d(values: Array) -> Array:
+        padded = jnp.pad(values, (radius, radius), mode="edge")
+        return jnp.convolve(padded, kernel, mode="valid")
+
+    row_smoothed = jax.vmap(convolve_1d)(field)
+    col_smoothed_t = jax.vmap(convolve_1d)(row_smoothed.T)
+    return col_smoothed_t.T
+
+
+def _stride_like_mask_rampoff(shape: tuple[int, int], ramp_size: int, dtype) -> Array:
+    """Build a Stride-like cosine ramp-off mask over the full field."""
+
+    nx, ny = shape
+    ramp = max(int(ramp_size), 0)
+    if ramp <= 1:
+        return jnp.ones((nx, ny), dtype=dtype)
+
+    dist_x = jnp.minimum(jnp.arange(nx), jnp.arange(nx)[::-1]).astype(jnp.float32)
+    dist_y = jnp.minimum(jnp.arange(ny), jnp.arange(ny)[::-1]).astype(jnp.float32)
+
+    def taper_from_dist(dist: Array) -> Array:
+        # Stride uses `1 - cos(pi/2 * index/(ramp-1))` near the edge and 1
+        # elsewhere. Distances beyond the ramp zone are fully preserved.
+        scaled = dist / float(ramp - 1)
+        edge_val = 1.0 - jnp.cos(0.5 * jnp.pi * jnp.clip(scaled, 0.0, 1.0))
+        return jnp.where(dist < ramp, edge_val, 1.0)
+
+    tx = taper_from_dist(dist_x).astype(dtype)
+    ty = taper_from_dist(dist_y).astype(dtype)
+    return tx[:, None] * ty[None, :]
+
+
 def process_global_gradient_stride_like(
     grad: Array,
     *,
     damping_cells: int,
+    model: Array | None = None,
     mask_grad: bool = True,
+    mask_rampoff: int = 10,
     smooth_grad: bool = True,
+    smooth_sigma: float = 0.25,
     smooth_radius: int = 2,
     norm_grad: bool = True,
+    norm_guess_change: float = 0.5,
+    global_norm: bool = False,
 ) -> Array:
     """Approximate Stride's default `ProcessGlobalGradient` pipeline.
 
@@ -66,29 +124,52 @@ def process_global_gradient_stride_like(
     - `norm_field`
 
     We reproduce the same high-level behaviour in pure JAX:
-    - mask: zero gradient in the outer absorbing frame
-    - smooth: apply a lightweight separable box filter
-    - norm: scale by max absolute amplitude to stabilise step magnitudes
+    - mask: Stride-like interior mask with cosine ramp-off
+    - smooth: apply Stride-like Gaussian smoothing (`smooth_sigma=0.25`) by
+      default, with a legacy box-filter fallback when sigma is non-positive
+    - norm: scale by max absolute amplitude, then apply Stride's
+      `norm_guess_change` factor derived from the current model midpoint
     """
 
     processed = grad
 
     if mask_grad:
         cells = max(int(damping_cells), 0)
+        interior = jnp.ones_like(processed)
         if cells > 0:
-            mask = jnp.ones_like(processed)
-            mask = mask.at[:cells, :].set(0.0)
-            mask = mask.at[-cells:, :].set(0.0)
-            mask = mask.at[:, :cells].set(0.0)
-            mask = mask.at[:, -cells:].set(0.0)
-            processed = processed * mask
+            interior = interior.at[:cells, :].set(0.0)
+            interior = interior.at[-cells:, :].set(0.0)
+            interior = interior.at[:, :cells].set(0.0)
+            interior = interior.at[:, -cells:].set(0.0)
+        ramp = _stride_like_mask_rampoff(
+            (processed.shape[0], processed.shape[1]),
+            mask_rampoff,
+            processed.dtype,
+        )
+        processed = processed * interior * ramp
 
     if smooth_grad:
-        processed = _box_smooth_2d(processed, radius=smooth_radius)
+        if float(smooth_sigma) > 0.0:
+            processed = _gaussian_smooth_2d(processed, sigma=smooth_sigma)
+        else:
+            processed = _box_smooth_2d(processed, radius=smooth_radius)
 
+    # Stride's default NormField uses per-step max-amplitude normalisation
+    # (`global_norm=False`) followed by a model-dependent correction:
+    #   var_corr = mid_model * norm_guess_change / 100
+    # We keep this behaviour in the JAX path so update magnitudes track the
+    # benchmark optimiser more closely.
     if norm_grad:
-        max_abs = jnp.max(jnp.abs(processed))
-        processed = processed / jnp.maximum(max_abs, 1.0e-12)
+        del global_norm
+        max_abs = jnp.max(jnp.abs(processed)) + 1.0e-31
+        var_corr = 1.0
+        if model is not None:
+            min_val = jnp.min(model)
+            max_val = jnp.max(model)
+            mid_val = 0.5 * (max_val + min_val)
+            guessed = mid_val * (norm_guess_change / 100.0)
+            var_corr = jnp.where(jnp.abs(guessed) > 0.0, guessed, 1.0)
+        processed = processed * (var_corr / max_abs)
 
     return processed
 

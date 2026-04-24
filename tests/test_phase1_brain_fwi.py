@@ -10,16 +10,22 @@ import unittest
 import jax
 import jax.numpy as jnp
 
+from experiments.phase1_brain_fwi import _build_random_shot_schedule
 from fwi.acoustics import (
     _apply_stride_like_time_window,
+    _process_trace_pair_for_stride_misfit,
     _build_boundary_terms,
     _prepare_source_wavelet,
+    _sponge2_subdomain_masks,
     _source_scale,
+    _stride_like_shift_traces,
     _stride_like_source_window,
     loss_and_grad,
+    shot_loss_from_traces,
     simulate_survey,
     simulate_survey_forward_only,
 )
+from fwi.filtering import bandlimit_traces
 from fwi.acoustics import _pad_model_for_solver
 from fwi.backends import build_backend
 from fwi.config import (
@@ -221,6 +227,50 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertLess(int(jnp.max(rec_refs[:, 0])), hicks_config.grid.nx)
         self.assertLess(int(jnp.max(rec_refs[:, 1])), hicks_config.grid.ny)
 
+    def test_hicks_coordinate_epsilon_changes_reference_gridpoints(self):
+        """Stride-like coordinate epsilon should affect Hicks reference points."""
+
+        base = _tiny_config()
+        # Use an exaggerated epsilon scale so this regression test is robust:
+        # if epsilon handling is removed, the references collapse back to the
+        # zero-epsilon case and this test catches the parity drift immediately.
+        epsilon_on = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(
+                base.acquisition,
+                interpolation_type="hicks",
+                apply_coordinate_epsilon=True,
+                coordinate_epsilon_scale=0.5,
+            ),
+            model=base.model,
+            solver=base.solver,
+        )
+        epsilon_off = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=replace(
+                base.acquisition,
+                interpolation_type="hicks",
+                apply_coordinate_epsilon=False,
+                coordinate_epsilon_scale=0.5,
+            ),
+            model=base.model,
+            solver=base.solver,
+        )
+
+        refs_on = init_params(jax.random.PRNGKey(0), config=epsilon_on)["acquisition"]
+        refs_off = init_params(jax.random.PRNGKey(0), config=epsilon_off)["acquisition"]
+
+        self.assertFalse(
+            bool(
+                jnp.allclose(
+                    refs_on.source_reference_gridpoints,
+                    refs_off.source_reference_gridpoints,
+                )
+            )
+        )
+
     def test_stride_like_source_window_respects_time_bounds(self):
         """Source window should be non-zero only inside requested bounds."""
 
@@ -276,6 +326,308 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(with_window[:4], 0.0)))
         self.assertTrue(bool(jnp.allclose(with_window[12:], 0.0)))
         self.assertGreater(float(jnp.sum(with_window[4:12])), 0.0)
+
+    def test_prepare_source_wavelet_applies_stride_like_fw3d_shift(self):
+        """FW3D mode should apply Stride's quarter-period wavelet shift."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                source_window_enabled=False,
+                stride_trace_processing=True,
+                fw3d_mode=True,
+                trace_filter_relaxation=0.75,
+            ),
+        )
+        wavelet = jnp.arange(base.time.nt, dtype=jnp.float32)
+        shifted = _prepare_source_wavelet(wavelet, config, f_max_hz=1.0e6)
+
+        filtered = bandlimit_traces(
+            wavelet,
+            config.time.dt,
+            1.0e6,
+            axis=0,
+            filter_type=config.solver.trace_filter_type,
+            relaxation=config.solver.trace_filter_relaxation,
+            order=config.solver.trace_filter_order,
+            zero_phase=config.solver.trace_filter_zero_phase,
+        )
+        expected = _stride_like_shift_traces(filtered, config, 1.0e6, axis=0)
+        self.assertTrue(bool(jnp.allclose(shifted, expected)))
+
+    def test_shot_loss_trace_processing_path_is_differentiable(self):
+        """Stride-like trace conditioning should keep shot loss differentiable."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                source_window_enabled=False,
+            ),
+        )
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+        observed = observed.at[:, : base.acquisition.n_transducers // 2].set(1.0)
+
+        loss_value = shot_loss_from_traces(modelled, observed, config, f_max_hz=2.0e5)
+        grad = jax.grad(
+            lambda traces: shot_loss_from_traces(
+                traces, observed, config, f_max_hz=2.0e5
+            )
+        )(modelled)
+
+        self.assertGreater(float(loss_value), 0.0)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+        self.assertEqual(grad.shape, modelled.shape)
+
+    def test_scale_per_shot_path_accepts_raw_observed_reference(self):
+        """ScalePerShot branch should execute with an explicit raw reference."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_scale_per_shot=True,
+                source_window_enabled=False,
+            ),
+        )
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed_processed = jnp.full_like(modelled, 0.5)
+        observed_raw = jnp.full_like(modelled, 2.0)
+
+        with_raw_ref = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed_processed,
+            observed_raw,
+            config,
+            f_max_hz=2.0e5,
+        )
+        without_raw_ref = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed_processed,
+            None,
+            config,
+            f_max_hz=2.0e5,
+        )
+
+        self.assertEqual(with_raw_ref[0].shape, modelled.shape)
+        self.assertEqual(with_raw_ref[1].shape, modelled.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(with_raw_ref[0]))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(with_raw_ref[1]))))
+        # With Stride's default `relative_scale=True`, ScalePerShot is
+        # effectively neutral in amplitude, so both reference choices should
+        # remain numerically close in this synthetic setup.
+        self.assertTrue(bool(jnp.allclose(with_raw_ref[0], without_raw_ref[0])))
+        self.assertTrue(bool(jnp.allclose(with_raw_ref[1], without_raw_ref[1])))
+
+    def test_trace_pipeline_can_disable_wavelet_filter_step(self):
+        """Wavelet preprocessing should respect filter-wavelets toggle."""
+
+        base = _tiny_config()
+        wavelet = jnp.arange(base.time.nt, dtype=jnp.float32)
+        filtered_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                source_window_enabled=False,
+                fw3d_mode=False,
+                diff_source=False,
+            ),
+        )
+        unfiltered_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                source_window_enabled=False,
+                fw3d_mode=False,
+                diff_source=False,
+            ),
+        )
+
+        prepared_filtered = _prepare_source_wavelet(wavelet, filtered_config, 2.0e5)
+        prepared_unfiltered = _prepare_source_wavelet(wavelet, unfiltered_config, 2.0e5)
+
+        self.assertTrue(bool(jnp.allclose(prepared_unfiltered, wavelet)))
+        self.assertFalse(bool(jnp.allclose(prepared_filtered, wavelet)))
+
+    def test_trace_pipeline_can_disable_mute_step(self):
+        """ProcessTraces mute toggle should control modelled gather muting."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        muted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_traces=True,
+                stride_trace_filter_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+            ),
+        )
+        unmuted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_traces=False,
+                stride_trace_filter_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+            ),
+        )
+
+        muted_pair = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed,
+            observed,
+            muted_config,
+            f_max_hz=2.0e5,
+        )
+        unmuted_pair = _process_trace_pair_for_stride_misfit(
+            modelled,
+            observed,
+            observed,
+            unmuted_config,
+            f_max_hz=2.0e5,
+        )
+        self.assertTrue(bool(jnp.allclose(muted_pair[0], 0.0)))
+        self.assertTrue(bool(jnp.allclose(unmuted_pair[0], modelled)))
+
+    def test_trace_pipeline_optional_time_weighting_changes_loss(self):
+        """Optional time weighting should alter the shot loss when enabled."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        weighted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                stride_trace_filter_traces=False,
+                stride_trace_mute_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=True,
+                stride_trace_time_weight_power=1.0,
+                stride_trace_time_weight_start=0,
+                stride_trace_time_weight_stop=base.time.nt,
+            ),
+        )
+        unweighted_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=False,
+                stride_trace_filter_traces=False,
+                stride_trace_mute_traces=False,
+                stride_trace_norm_per_shot=False,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=False,
+            ),
+        )
+
+        weighted_loss = shot_loss_from_traces(modelled, observed, weighted_config, None)
+        unweighted_loss = shot_loss_from_traces(
+            modelled, observed, unweighted_config, None
+        )
+
+        self.assertGreater(float(unweighted_loss), 0.0)
+        self.assertGreater(float(weighted_loss), 0.0)
+        self.assertNotEqual(float(weighted_loss), float(unweighted_loss))
+
+    def test_wavelet_preprocess_respects_wavelet_relaxation(self):
+        """ProcessWavelets filter should reflect wavelet-side relaxation."""
+
+        base = _tiny_config()
+        wavelet = jnp.asarray(
+            jnp.sin(2.0 * jnp.pi * jnp.arange(base.time.nt) / 5.0),
+            dtype=jnp.float32,
+        )
+        low_relax_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=False,
+                source_window_enabled=False,
+                trace_filter_relaxation_wavelets=0.5,
+            ),
+        )
+        high_relax_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=False,
+                source_window_enabled=False,
+                trace_filter_relaxation_wavelets=1.0,
+            ),
+        )
+        low_relaxed = _prepare_source_wavelet(wavelet, low_relax_config, 2.0e5)
+        high_relaxed = _prepare_source_wavelet(wavelet, high_relax_config, 2.0e5)
+
+        self.assertFalse(bool(jnp.allclose(low_relaxed, high_relaxed)))
 
     def test_stride_like_time_window_applies_across_trace_axis(self):
         """Configured source window should also apply to adjoint/source traces."""
@@ -559,6 +911,74 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(processed[4, 3]), 0.0)
         self.assertGreater(float(processed[3, 4]), 0.0)
 
+    def test_stride_like_gradient_processing_applies_norm_guess_change(self):
+        """NormField parity should apply Stride's model-dependent scaling."""
+
+        grad = jnp.zeros((4, 4), dtype=jnp.float32).at[2, 2].set(5.0)
+        model = jnp.full((4, 4), 2000.0, dtype=jnp.float32)
+
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            model=model,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            norm_guess_change=0.5,
+        )
+
+        # With max |grad| = 5 and Stride-like var_corr = 2000 * 0.5 / 100 = 10,
+        # the peak amplitude should be scaled to 10.
+        self.assertTrue(bool(jnp.isclose(jnp.max(jnp.abs(processed)), 10.0)))
+
+    def test_stride_like_gradient_processing_supports_legacy_box_smoothing(self):
+        """Non-positive smooth_sigma should trigger box-filter fallback."""
+
+        grad = jnp.zeros((9, 9), dtype=jnp.float32).at[4, 4].set(1.0)
+        gaussian = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_sigma=0.25,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+        box = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=True,
+            smooth_sigma=0.0,
+            smooth_radius=1,
+            norm_grad=False,
+        )
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(gaussian))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(box))))
+        # Regression guard: the sigma<=0 branch should be an actual alternate
+        # smoothing path, not accidentally identical to the Gaussian one.
+        self.assertFalse(bool(jnp.allclose(gaussian, box)))
+
+    def test_stride_like_gradient_mask_uses_soft_rampoff(self):
+        """MaskField parity should apply a cosine ramp near domain edges."""
+
+        grad = jnp.ones((9, 9), dtype=jnp.float32)
+        processed = process_global_gradient_stride_like(
+            grad,
+            damping_cells=0,
+            mask_grad=True,
+            mask_rampoff=4,
+            smooth_grad=False,
+            norm_grad=False,
+        )
+
+        self.assertEqual(processed.shape, grad.shape)
+        self.assertTrue(bool(jnp.isclose(processed[0, 0], 0.0)))
+        self.assertTrue(bool(jnp.isclose(processed[4, 4], 1.0)))
+        self.assertGreater(float(processed[1, 1]), 0.0)
+        self.assertLess(float(processed[1, 1]), 1.0)
+
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""
 
@@ -575,6 +995,20 @@ class Phase1BrainFWITests(unittest.TestCase):
         centre = float(mask[config.grid.nx // 2, config.grid.ny // 2])
         edge = float(mask[1, config.grid.ny // 2])
         self.assertGreaterEqual(centre, edge)
+
+    def test_stride_like_boundary_mode_keeps_edge_updates_active(self):
+        """Stride-like mode should avoid hard edge clamping in the update mask."""
+
+        config = _tiny_config()
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        mask, _ = _build_boundary_terms(config, velocity)
+
+        # A strict hard clamp would force these corners to exactly zero.
+        # Stride-like damping keeps them active while attenuated.
+        self.assertGreater(float(mask[0, 0]), 0.0)
+        self.assertGreater(float(mask[0, -1]), 0.0)
+        self.assertGreater(float(mask[-1, 0]), 0.0)
+        self.assertGreater(float(mask[-1, -1]), 0.0)
 
     def test_sponge2_boundary_mode_exposes_positive_damping_field(self):
         """Sponge2 mode should return a non-zero damping field near boundaries."""
@@ -600,6 +1034,33 @@ class Phase1BrainFWITests(unittest.TestCase):
                 jnp.allclose(sponge_damp[config.grid.nx // 2, config.grid.ny // 2], 0.0)
             )
         )
+
+    def test_sponge2_subdomain_masks_split_interior_and_boundary(self):
+        """Sponge2 masks should partition zero-damp and damped subdomains."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=1),
+        )
+        interior, boundary = _sponge2_subdomain_masks(
+            config,
+            (config.grid.nx, config.grid.ny),
+            jnp.float32,
+        )
+
+        self.assertTrue(
+            bool(jnp.isclose(interior[config.grid.nx // 2, config.grid.ny // 2], 1.0))
+        )
+        self.assertTrue(
+            bool(jnp.isclose(boundary[config.grid.nx // 2, config.grid.ny // 2], 0.0))
+        )
+        self.assertTrue(bool(jnp.isclose(interior[0, 0], 0.0)))
+        self.assertTrue(bool(jnp.isclose(boundary[0, 0], 1.0)))
+        self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
 
     def test_sponge2_default_reflection_matches_stride_width_rule(self):
         """Default reflection coefficient should follow Stride's width heuristic."""
@@ -741,6 +1202,35 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertIn("(total=16)", long_preview)
         self.assertIn("...", long_preview)
+
+    def test_stride_like_random_shot_schedule_avoids_repeats_before_wrap(self):
+        """Random shot scheduling should consume one permutation before repeats."""
+
+        schedule = _build_random_shot_schedule(
+            available_shots=jnp.arange(8, dtype=jnp.int32),
+            stage_steps=(1, 2),
+            shots_per_iter=3,
+            seed=7,
+        )
+
+        first_cycle = jnp.concatenate((schedule[0][0], schedule[1][0], schedule[1][1]))
+        self.assertEqual(first_cycle.shape[0], 8)
+        self.assertEqual(int(jnp.unique(first_cycle).shape[0]), 8)
+
+    def test_stride_like_random_shot_schedule_allows_short_boundary_batches(self):
+        """Stride-like queue consumption should allow short batches at wrap boundaries."""
+
+        schedule = _build_random_shot_schedule(
+            available_shots=jnp.arange(8, dtype=jnp.int32),
+            stage_steps=(4,),
+            shots_per_iter=3,
+            seed=123,
+        )
+        batch_lengths = [int(batch.shape[0]) for batch in schedule[0]]
+
+        # With 8 shots and batch size 3, Stride's queue logic yields lengths:
+        # 3, 3, 2, then a new cycle starts.
+        self.assertEqual(batch_lengths[:3], [3, 3, 2])
 
     def test_run_complete_marker_writes_expected_artifact(self):
         """Completion marker should be created with artifact references."""

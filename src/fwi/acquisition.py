@@ -172,6 +172,7 @@ def _grid_to_physical_coordinates(
     *,
     spacing: tuple[float, float],
     origin: tuple[float, float],
+    epsilon_scale: float = 0.0,
 ) -> np.ndarray:
     """Convert grid-index coordinates into physical coordinates.
 
@@ -188,7 +189,18 @@ def _grid_to_physical_coordinates(
 
     spacing_array = np.asarray(spacing, dtype=np.float32)
     origin_array = np.asarray(origin, dtype=np.float32)
-    return np.asarray(grid_coordinates, dtype=np.float32) * spacing_array + origin_array
+    physical_coordinates = (
+        np.asarray(grid_coordinates, dtype=np.float32) * spacing_array + origin_array
+    )
+    if epsilon_scale == 0.0:
+        return physical_coordinates
+
+    # Stride applies a tiny spacing-proportional perturbation before sparse
+    # interpolation setup (`eps_coords = 1e-3 * spacing`). Keeping this as an
+    # explicit coordinate shift improves parity with the benchmark path while
+    # remaining deterministic and differentiability-friendly in the JAX setup.
+    epsilon = float(epsilon_scale) * spacing_array
+    return physical_coordinates + epsilon
 
 
 def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
@@ -229,6 +241,9 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
             coords,
             spacing=spacing,
             origin=origin,
+            epsilon_scale=(
+                acq.coordinate_epsilon_scale if acq.apply_coordinate_epsilon else 0.0
+            ),
         )
 
         src_ref, src_coeff = _calculate_hicks(
@@ -279,6 +294,8 @@ def build_elliptical_acquisition(config: BrainFWIConfig) -> AcquisitionGeometry:
             ("interpolation_type", acq.interpolation_type),
             ("source_frequency_hz", acq.source_frequency_hz),
             ("source_cycles", acq.source_cycles),
+            ("coordinate_epsilon_scale", acq.coordinate_epsilon_scale),
+            ("apply_coordinate_epsilon", acq.apply_coordinate_epsilon),
             # Keeping the amplitude explicit in metadata makes it easier to
             # audit source-normalisation changes when we compare against the
             # bundled Stride scripts, which do not add a large extra factor.

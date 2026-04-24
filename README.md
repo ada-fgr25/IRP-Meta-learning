@@ -153,10 +153,14 @@ Useful options include:
 * `--grad-shot-batch-size` to control forward+adjoint shot batching during gradient accumulation: `1` is lowest memory, larger values can improve throughput
 * `--source-window-enabled`, `--source-window-alpha`, `--source-window-start`, and `--source-window-stop` to control Stride-like Tukey source preprocessing before injection
 * `--print-shot-progress` to print active source IDs for each step (useful for long runs)
-* `--stride-grad-processing`, `--mask-grad`, `--smooth-grad`, `--norm-grad`, and `--grad-smooth-radius` to toggle Stride-like global gradient processing before each update
+* `--stride-grad-processing`, `--mask-grad`, `--grad-mask-rampoff`, `--smooth-grad`, `--norm-grad`, `--grad-smooth-sigma`, `--grad-smooth-radius`, `--grad-norm-guess-change`, and `--grad-global-norm` to control Stride-like global gradient processing before each update
 * `--damping-mode {legacy,stride_like,sponge2}` plus damping profile options (`--damping-type`, `--damping-cells`, `--damping-power-degree`, `--damping-reflection-coefficient`) to compare boundary treatments. If reflection is omitted, the default follows Stride's absorbing-width heuristic.
 * `--density-model`, `--attenuation-model`, and `--attenuation-power` to enable fixed extra medium terms in the JAX solver
 * `--interpolation-type {linear,hicks}` to select source/receiver interpolation
+* `--apply-coordinate-epsilon` and `--coordinate-epsilon-scale` to control the Stride-style coordinate perturbation used before Hicks sparse interpolation setup
+* `--fw3d-mode`, `--stride-trace-processing`, `--stride-trace-filter-wavelets`, `--stride-trace-filter-traces`, `--stride-trace-mute-traces`, `--stride-trace-norm-per-shot`, and `--stride-trace-scale-per-shot` to control Stride-like shift/mute/filter/norm/scale trace-conditioning steps in the JAX misfit path
+* `--trace-filter-relaxation-wavelets` and `--trace-filter-relaxation-traces` to match Stride's separate wavelet-side and trace-side relaxation factors
+* `--stride-trace-time-weighting`, `--stride-trace-time-weight-power`, `--stride-trace-time-weight-start`, and `--stride-trace-time-weight-stop` to enable and configure an optional differentiable time-weighting stage in the trace misfit path
 * `--nx`, `--ny`, `--nt` to override the benchmark-aligned spatial and temporal defaults
 * `--n-transducers`, `--n-shots` to adjust acquisition cost or available shot pool
 
@@ -191,15 +195,24 @@ The core implementation lives directly under `src/fwi/` so imports stay short an
 Parity note:
 
 * The JAX baseline now intentionally tracks several Stride inverse-script choices more closely: the same benchmark-scale geometry/time defaults, SGD with step size `5` as the default optimiser, random `32`-shot subsets per iteration, a `3`-block `f_max` schedule `[0.1, 0.2, 0.3] MHz`, and Stride-style L2 loss scaling.
+* Random shot scheduling now also mirrors Stride's queue-based selection semantics more closely: shot IDs are drawn from a persistent random permutation (sorted per iteration), so repeats are avoided until the queue is exhausted and boundary iterations may contain fewer than `shots_per_iter` shots.
 * The JAX solver now also mirrors several discrete `IsoAcousticDevito` choices more directly: `OT4` time stepping by default, Stride-style source scaling `2 * dt**2 * vp / max(dx, dy)` with optional `diff_source`, and an explicit adjoint built from the exact linearisation of that discrete update.
 * The JAX acquisition path now supports Stride-style `hicks` interpolation with precomputed sinc/Kaiser coefficients (including Stride's source smoothing variant), in addition to the existing `linear` mode.
-* The optimisation loop now includes a Stride-like approximation of `ProcessGlobalGradient` (`mask_field -> smooth_field -> norm_field`) before each SGD/Adam update and still applies model clipping after each step to stay within physical velocity bounds.
+* Hicks acquisition building now also mirrors Stride's sparse-function setup more closely by adding the same tiny spacing-scaled coordinate epsilon (`1e-3 * spacing` by default) before precomputing interpolation stencils.
+* The optimisation loop now includes a closer Stride-style `ProcessGlobalGradient` analogue (`mask_field -> smooth_field -> norm_field`) before each SGD/Adam update: cosine-ramped mask taper (`mask_rampoff=10`), Gaussian smoothing by default (`smooth_sigma=0.25`), and Stride-like `norm_guess_change` model-dependent gradient scaling. Model clipping remains as the analogue of Stride's `ProcessModelIteration`.
 * The JAX continuation path now uses a Stride-like cosine low-pass filter with the same `0.75` relaxation factor by default, rather than a hard FFT cutoff. The explicit adjoint applies the corresponding filter transpose so the gradient remains consistent with the filtered loss.
+* The JAX loss path now includes a differentiable analogue of Stride's trace-processing pipeline: Stride-style wavelet/observed pre-filtering and FW3D shifts, followed by pre-misfit mute/filter/norm conditioning (and optional scale-per-shot), with cotangents computed through that processing so explicit adjoint gradients stay aligned.
+* Trace-pipeline parity controls are now split per Stride step (`filter_wavelets`, `filter_traces`, `mute_traces`, `norm_per_shot`, and optional `scale_per_shot`) so each conditioning stage can be matched or ablated independently.
+* The JAX trace path now also keeps separate relaxation controls for wavelet/observed preprocessing and pre-misfit trace processing, matching Stride's `filter_wavelets_relaxation` vs `filter_traces_relaxation` split.
+* The JAX trace path now also exposes an optional differentiable `time_weighting` stage for parity/ablation studies; it is disabled by default and configurable via ramp power and time bounds.
+* When optional `scale_per_shot` conditioning is enabled, the JAX path now also mirrors Stride's reference scaling semantics by using the raw observed shot as `scale_to` rather than the already processed observed gather.
 * The JAX solver now runs on a padded domain by default (`50` extra cells per side) so the damping frame sits outside the physical model, and its spatial operator now defaults to `space_order=10` rather than the old three-point Laplacian.
 * The JAX solver now also supports optional fixed density/buoyancy and attenuation fields while still inverting for velocity. These fields participate in both the forward simulation and the explicit velocity adjoint when enabled.
 * The attenuation path now mirrors Stride's Devito operator more closely by converting attenuation from `dB/cm` to Nepers and using a centered-in-time attenuation update for power `0`.
 * The `sponge2` boundary path now tracks Stride defaults more closely by leaving the update mask fully active (no hard edge clamp) and deriving the reflection coefficient from absorbing width when not explicitly overridden.
+* The `stride_like` damping-mask path now also leaves edge updates active (no extra hard edge clamp), so attenuation is controlled by the damping profile itself as in Stride's damping helper.
 * The `sponge2` stencil now also applies local `vp^2` scaling in the damped second-order update, matching the way Stride's Devito acoustic stencil injects the sponge boundary term.
+* The `sponge2` time update now mirrors Devito's interior-vs-boundary split more explicitly by combining separate interior and boundary stencil forms through geometry-derived subdomain masks (`damping_cells`), keeping the branch fully differentiable.
 * Stride-like damping field construction now uses pointwise local velocity scaling rather than a global maximum-velocity scale when velocity scaling is enabled.
 * Source preprocessing now mirrors Stride's setup more closely by applying a configurable Tukey window over a configurable time-bounds interval in both forward source injection and adjoint-source (trace cotangent) preparation.
 * Forward-only survey calls (observation generation, diagnostics, and final metrics) now use a dedicated no-checkpoint path, and optionally support controlled shot mini-batching via `forward_shot_batch_size` for better speed/memory tuning.

@@ -360,7 +360,11 @@ def _build_boundary_terms(
     if config.solver.damping_mode == "stride_like":
         sigma = _build_stride_like_damping_sigma(config, velocity)
         damping = jnp.exp(-sigma * config.time.dt)
-        return damping * interior, jnp.zeros_like(velocity)
+        # Stride's boundary damping helper expresses attenuation directly through
+        # the damping field and does not additionally hard-clamp outer grid
+        # rows/columns to zero in the update mask. Returning the damping mask as
+        # is keeps this mode closer to the Stride/Devito behaviour.
+        return damping, jnp.zeros_like(velocity)
 
     if config.solver.damping_mode == "sponge2":
         sigma = _build_stride_like_damping_sigma(config, velocity)
@@ -377,6 +381,33 @@ def _build_boundary_terms(
         f"Unsupported damping_mode '{config.solver.damping_mode}'. "
         "Use 'legacy', 'stride_like', or 'sponge2'."
     )
+
+
+def _sponge2_subdomain_masks(
+    config: BrainFWIConfig,
+    shape: tuple[int, int],
+    dtype: jnp.dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Derive explicit interior/boundary masks from Sponge2 damping.
+
+    Devito runs separate interior and boundary stencils for the acoustic step,
+    with the sponge damping term only active in absorbing subdomains selected by
+    geometry. In JAX we mirror that structure by deriving binary masks directly
+    from the configured absorbing-frame width (`damping_cells`), avoiding
+    value-dependent branching so the update remains fully differentiable.
+    """
+
+    nx, ny = shape
+    cells = max(int(config.solver.damping_cells), 0)
+    if cells == 0:
+        return jnp.ones(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype)
+
+    ix = jnp.minimum(jnp.arange(nx), jnp.arange(nx)[::-1])
+    iy = jnp.minimum(jnp.arange(ny), jnp.arange(ny)[::-1])
+    dist = jnp.minimum(ix[:, None], iy[None, :])
+    boundary = (dist < cells).astype(dtype)
+    interior = 1.0 - boundary
+    return interior, boundary
 
 
 def _inject_linear_point(
@@ -528,8 +559,307 @@ def _time_derivative(samples: jnp.ndarray, dt: float) -> jnp.ndarray:
     return jnp.concatenate((first[None], middle, last[None]))
 
 
+def _stride_like_shift_traces(
+    traces: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+    *,
+    axis: int,
+    relaxation: float | None = None,
+) -> jnp.ndarray:
+    """Apply Stride's `shift_traces` step along the selected time axis.
+
+    Stride computes `period = round(1 / (f_max * dt / relaxation))` and then
+    shifts traces by `period // 4` samples toward earlier time, leaving the
+    tail samples untouched. We mirror that exact shape here because this step
+    is active in the benchmark path when `fw3d_mode=True`.
+    """
+
+    if not config.solver.fw3d_mode or f_max_hz is None:
+        return traces
+
+    moved = jnp.moveaxis(traces, axis, -1)
+    n_time = int(moved.shape[-1])
+    filter_relaxation = (
+        config.solver.trace_filter_relaxation
+        if relaxation is None
+        else float(relaxation)
+    )
+    safe_relaxation = max(float(filter_relaxation), 1.0e-6)
+    f_max_dimless = (
+        jnp.asarray(f_max_hz, dtype=moved.dtype)
+        * float(config.time.dt)
+        / safe_relaxation
+    )
+
+    # Keep this computation JAX-trace-safe: no Python int casts from traced
+    # values. This avoids concretization failures inside `lax.scan`/`jit`.
+    positive_fmax = f_max_dimless > 0.0
+    reciprocal = jnp.where(positive_fmax, 1.0 / f_max_dimless, 0.0)
+    period = jnp.rint(reciprocal).astype(jnp.int32)
+    shift = jnp.where(positive_fmax, period // 4, 0)
+
+    time_indices = jnp.arange(n_time, dtype=jnp.int32)
+    src_indices = jnp.where(
+        time_indices < (n_time - shift), time_indices + shift, time_indices
+    )
+    shifted = jnp.take(moved, src_indices, axis=-1)
+    return jnp.moveaxis(shifted, -1, axis)
+
+
+def _stride_like_norm_per_shot(traces: jnp.ndarray) -> jnp.ndarray:
+    """Apply Stride's `norm_per_shot` scaling on one shot gather.
+
+    Stride computes the RMS-like denominator as
+    `sqrt(sum(traces**2) / num_receivers)` and applies it independently to each
+    gather (`modelled` and `observed` are normalised separately).
+    """
+
+    num_receivers = traces.shape[1]
+    denom = jnp.sqrt(jnp.sum(traces**2) / jnp.maximum(num_receivers, 1)) + 1.0e-31
+    return traces / denom
+
+
+def _stride_like_scale_per_shot(
+    traces: jnp.ndarray, scale_to: jnp.ndarray
+) -> jnp.ndarray:
+    """Apply Stride's optional `scale_per_shot` step.
+
+    The default Stride benchmark does not enable this, but exposing the helper
+    keeps the JAX path feature-complete for side-by-side ablations.
+    """
+
+    norm_scale_to = (
+        jnp.sqrt(jnp.sum(scale_to**2) / jnp.maximum(scale_to.shape[1], 1)) + 1.0e-31
+    )
+    relative_scale = norm_scale_to + 1.0e-31
+    return traces * norm_scale_to / relative_scale
+
+
+def _stride_like_time_weights(
+    n_time: int,
+    config: BrainFWIConfig,
+    dtype,
+) -> jnp.ndarray:
+    """Build optional Stride-like time weights for one shot gather.
+
+    The tracked Stride version in this repository keeps `_time_weights()` as a
+    no-op (`1.`), but `ProcessTraces` exposes an optional `time_weighting`
+    stage in other configurations/versions. We provide a differentiable JAX
+    analogue here so parity experiments can enable it explicitly.
+    """
+
+    n_time = max(int(n_time), 0)
+    if n_time <= 0:
+        return jnp.zeros((0,), dtype=dtype)
+
+    start_idx = max(int(config.solver.stride_trace_time_weight_start), 0)
+    stop_cfg = config.solver.stride_trace_time_weight_stop
+    stop_idx = n_time if stop_cfg is None else min(max(int(stop_cfg), 0), n_time)
+    if stop_idx <= start_idx:
+        return jnp.ones((n_time,), dtype=dtype)
+
+    weights = jnp.ones((n_time,), dtype=dtype)
+    window_len = stop_idx - start_idx
+    if window_len <= 1:
+        return weights
+
+    power = max(float(config.solver.stride_trace_time_weight_power), 0.0)
+    ramp = jnp.linspace(0.0, 1.0, window_len, dtype=dtype) ** power
+    return weights.at[start_idx:stop_idx].set(ramp)
+
+
+def _apply_stride_like_time_weighting(
+    traces: jnp.ndarray,
+    config: BrainFWIConfig,
+) -> jnp.ndarray:
+    """Apply optional Stride-like time weighting to `[time, receiver]` traces."""
+
+    if not config.solver.stride_trace_time_weighting:
+        return traces
+
+    weights = _stride_like_time_weights(traces.shape[0], config, traces.dtype)
+    return traces * weights[:, None]
+
+
+def _stride_like_mute_modelled(
+    modelled: jnp.ndarray,
+    observed: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+) -> jnp.ndarray:
+    """Apply Stride's `mute_traces` step to modelled traces.
+
+    The mute mask is built from non-zero observed samples, then smoothed with a
+    cosine low-pass filter (zero-phase). This keeps modelled traces from
+    contributing where observed data is absent and improves conditioning.
+    """
+
+    mute_mask = (jnp.abs(observed) > 0.0).astype(modelled.dtype)
+    filter_relaxation = float(config.solver.trace_filter_relaxation_traces)
+    mute_filter_fmax_hz = (
+        float(f_max_hz)
+        if f_max_hz is not None
+        else 0.5 * filter_relaxation / float(config.time.dt)
+    )
+    mute_mask = bandlimit_traces(
+        mute_mask,
+        config.time.dt,
+        mute_filter_fmax_hz,
+        axis=0,
+        filter_type="cos",
+        relaxation=filter_relaxation,
+        order=1,
+        zero_phase=True,
+    )
+    return modelled * mute_mask
+
+
+def _stride_like_filter_traces(
+    traces: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+    *,
+    relaxation: float | None = None,
+) -> jnp.ndarray:
+    """Apply the configured Stride-like trace filter to one gather."""
+
+    filter_relaxation = (
+        config.solver.trace_filter_relaxation
+        if relaxation is None
+        else float(relaxation)
+    )
+    return bandlimit_traces(
+        traces,
+        config.time.dt,
+        f_max_hz,
+        axis=0,
+        filter_type=config.solver.trace_filter_type,
+        relaxation=filter_relaxation,
+        order=config.solver.trace_filter_order,
+        zero_phase=config.solver.trace_filter_zero_phase,
+    )
+
+
+def _process_observed_shot_for_stride_misfit(
+    observed_shot: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+) -> jnp.ndarray:
+    """Mirror Stride's observed-side processing before `ProcessTraces`."""
+
+    if not config.solver.stride_trace_processing:
+        return observed_shot
+
+    observed = (
+        _stride_like_filter_traces(
+            observed_shot,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_wavelets,
+        )
+        if config.solver.stride_trace_filter_wavelets
+        else observed_shot
+    )
+    return _stride_like_shift_traces(
+        observed,
+        config,
+        f_max_hz,
+        axis=0,
+        relaxation=config.solver.trace_filter_relaxation_wavelets,
+    )
+
+
+def _process_trace_pair_for_stride_misfit(
+    modelled_shot: jnp.ndarray,
+    observed_shot: jnp.ndarray,
+    observed_scale_reference: jnp.ndarray | None,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Apply a Stride-like `ProcessTraces` analogue to one shot pair."""
+
+    if not config.solver.stride_trace_processing:
+        return modelled_shot, observed_shot
+
+    muted_modelled = (
+        _stride_like_mute_modelled(
+            modelled_shot,
+            observed_shot,
+            config,
+            f_max_hz,
+        )
+        if config.solver.stride_trace_mute_traces
+        else modelled_shot
+    )
+    modelled = (
+        _stride_like_filter_traces(
+            muted_modelled,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_traces,
+        )
+        if config.solver.stride_trace_filter_traces
+        else muted_modelled
+    )
+    observed = (
+        _stride_like_filter_traces(
+            observed_shot,
+            config,
+            f_max_hz,
+            relaxation=config.solver.trace_filter_relaxation_traces,
+        )
+        if config.solver.stride_trace_filter_traces
+        else observed_shot
+    )
+    if config.solver.stride_trace_norm_per_shot:
+        modelled = _stride_like_norm_per_shot(modelled)
+        observed = _stride_like_norm_per_shot(observed)
+
+    if config.solver.stride_trace_scale_per_shot:
+        scale_to = (
+            observed_shot
+            if observed_scale_reference is None
+            else observed_scale_reference
+        )
+        modelled = _stride_like_scale_per_shot(modelled, scale_to)
+        observed = _stride_like_scale_per_shot(observed, scale_to)
+
+    if config.solver.stride_trace_time_weighting:
+        modelled = _apply_stride_like_time_weighting(modelled, config)
+        observed = _apply_stride_like_time_weighting(observed, config)
+
+    return modelled, observed
+
+
+def shot_loss_from_traces(
+    modelled_shot: jnp.ndarray,
+    observed_shot: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None,
+) -> jnp.ndarray:
+    """Return one-shot loss after Stride-like differentiable trace processing."""
+
+    observed_preprocessed = _process_observed_shot_for_stride_misfit(
+        observed_shot,
+        config,
+        f_max_hz,
+    )
+    modelled_processed, observed_processed = _process_trace_pair_for_stride_misfit(
+        modelled_shot,
+        observed_preprocessed,
+        observed_shot,
+        config,
+        f_max_hz,
+    )
+    residual = modelled_processed - observed_processed
+    return 0.5 * jnp.sum(residual**2)
+
+
 def _prepare_source_wavelet(
-    wavelet: jnp.ndarray, config: BrainFWIConfig
+    wavelet: jnp.ndarray,
+    config: BrainFWIConfig,
+    f_max_hz: float | None = None,
 ) -> jnp.ndarray:
     """Convert the acquisition wavelet into the injected source samples.
 
@@ -544,7 +874,23 @@ def _prepare_source_wavelet(
         if config.solver.diff_source
         else wavelet
     )
-    return _apply_stride_like_time_window(prepared, config, axis=0)
+    prepared = _apply_stride_like_time_window(prepared, config, axis=0)
+    if config.solver.stride_trace_processing:
+        if config.solver.stride_trace_filter_wavelets:
+            prepared = _stride_like_filter_traces(
+                prepared,
+                config,
+                f_max_hz,
+                relaxation=config.solver.trace_filter_relaxation_wavelets,
+            )
+        prepared = _stride_like_shift_traces(
+            prepared,
+            config,
+            f_max_hz,
+            axis=0,
+            relaxation=config.solver.trace_filter_relaxation_wavelets,
+        )
+    return prepared
 
 
 def _stride_like_tukey_window(
@@ -857,7 +1203,22 @@ def _propose_next_field(
         # and `damp` is the pre-scaled SpongeBoundary2 field (`7*sigma*dt`).
         sponge_linear = velocity_sq * sponge_damp * config.time.dt
         sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
-        numerator = (
+        interior_mask, boundary_subdomain_mask = _sponge2_subdomain_masks(
+            config, u_curr.shape, u_curr.dtype
+        )
+
+        # Interior stencil: identical to the undamped second-order step.
+        interior_numerator = (
+            2.0 * u_curr
+            - (1.0 - attenuation_implicit) * u_prev
+            + pressure_update
+            + attenuation_update
+            + source_update
+        )
+        interior_update = interior_numerator / (1.0 + attenuation_implicit)
+
+        # Boundary stencil: add the Stride-style sponge terms.
+        boundary_numerator = (
             2.0 * u_curr
             - (1.0 - sponge_linear - attenuation_implicit) * u_prev
             + pressure_update
@@ -865,9 +1226,13 @@ def _propose_next_field(
             + source_update
             - sponge_quadratic * u_curr
         )
-        return boundary_mask * (
-            numerator / (1.0 + sponge_linear + attenuation_implicit)
+        boundary_update = boundary_numerator / (
+            1.0 + sponge_linear + attenuation_implicit
         )
+        combined = (
+            interior_mask * interior_update + boundary_subdomain_mask * boundary_update
+        )
+        return boundary_mask * combined
 
     numerator = (
         2.0 * u_curr
@@ -1013,6 +1378,7 @@ def _simulate_shot_with_checkpoints(
     config: BrainFWIConfig,
     medium: AcousticMedium | None,
     shot_index: jnp.ndarray,
+    f_max_hz: float | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run one shot while storing sparse checkpoints for later recomputation.
 
@@ -1046,7 +1412,7 @@ def _simulate_shot_with_checkpoints(
     receiver_i = solver_receivers[:, 0]
     receiver_j = solver_receivers[:, 1]
     boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
-    source_wavelet = _prepare_source_wavelet(wavelet, config)
+    source_wavelet = _prepare_source_wavelet(wavelet, config, f_max_hz=f_max_hz)
     wavelet_segments, active_segments = _segment_wavelet(
         source_wavelet,
         config.solver.checkpoint_interval,
@@ -1134,7 +1500,7 @@ def _simulate_shot_forward_only(
     receiver_i = solver_receivers[:, 0]
     receiver_j = solver_receivers[:, 1]
     boundary_mask, sponge_damp = _build_boundary_terms(config, padded_velocity)
-    source_wavelet = _prepare_source_wavelet(wavelet, config)
+    source_wavelet = _prepare_source_wavelet(wavelet, config, f_max_hz=None)
 
     # Keep an explicit active mask so this scan remains robust even if future
     # wavelet construction introduces padded/no-op samples.
@@ -1379,7 +1745,6 @@ def loss_and_grad(
     with an optional `f_max` low-pass filter applied in the trace domain.
     """
 
-    dt = config.time.dt
     (
         receivers,
         acquisition_shot_indices,
@@ -1434,35 +1799,19 @@ def loss_and_grad(
             config,
             medium,
             shot_index,
+            f_max_hz=f_max_hz,
         )
-        residual = traces - observed_shot
-
-        # The FFT mask defines a linear zero-phase operator. Applying it to the
-        # residual gives us the band-limited misfit used for the current stage,
-        # and because the filter is symmetric in time the same filtered residual
-        # also acts as the trace-domain cotangent for the adjoint.
-        residual = bandlimit_traces(
-            residual,
-            dt,
-            f_max_hz,
-            axis=0,
-            filter_type=config.solver.trace_filter_type,
-            relaxation=config.solver.trace_filter_relaxation,
-            order=config.solver.trace_filter_order,
-            zero_phase=config.solver.trace_filter_zero_phase,
-        )
-        shot_loss = 0.5 * jnp.sum(residual**2)
-        data_cotangents = bandlimit_traces(
-            residual,
-            dt,
-            f_max_hz,
-            axis=0,
-            filter_type=config.solver.trace_filter_type,
-            relaxation=config.solver.trace_filter_relaxation,
-            order=config.solver.trace_filter_order,
-            zero_phase=config.solver.trace_filter_zero_phase,
-            adjoint=not config.solver.trace_filter_zero_phase,
-        )
+        shot_loss, data_cotangents = jax.value_and_grad(
+            lambda shot_traces: shot_loss_from_traces(
+                shot_traces,
+                observed_shot,
+                config,
+                f_max_hz,
+            )
+        )(traces)
+        # Stride applies source-style time-bounds conditioning when loading the
+        # adjoint source traces. Reusing the same configurable window here keeps
+        # the explicit JAX adjoint aligned with that behaviour.
         data_cotangents = _apply_stride_like_time_window(
             data_cotangents, config, axis=0
         )
@@ -1657,11 +2006,25 @@ def loss_and_grad(
         shot_batch, observed_batch, active_mask = xs
         batch_losses, batch_grads = jax.vmap(shot_loss_grad)(shot_batch, observed_batch)
 
-        active_loss = active_mask.astype(batch_losses.dtype)
-        active_grad = active_mask.astype(batch_grads.dtype)[:, None, None]
+        # Inactive tail entries come from padding the final partial batch.
+        # Their forward/adjoint solve can still produce NaNs (for example if a
+        # processing step normalises an all-zero synthetic gather). Applying a
+        # multiplicative 0/1 mask is not sufficient because `0 * NaN = NaN`.
+        # We therefore explicitly select zeros for inactive entries before the
+        # reduction so masked tails are guaranteed to be numerically inert.
+        masked_losses = jnp.where(
+            active_mask,
+            batch_losses,
+            jnp.zeros_like(batch_losses),
+        )
+        masked_grads = jnp.where(
+            active_mask[:, None, None],
+            batch_grads,
+            jnp.zeros_like(batch_grads),
+        )
         return (
-            total_loss + jnp.sum(batch_losses * active_loss),
-            total_grad + jnp.sum(batch_grads * active_grad, axis=0),
+            total_loss + jnp.sum(masked_losses),
+            total_grad + jnp.sum(masked_grads, axis=0),
         ), None
 
     init = (jnp.array(0.0, dtype=velocity.dtype), jnp.zeros_like(velocity))

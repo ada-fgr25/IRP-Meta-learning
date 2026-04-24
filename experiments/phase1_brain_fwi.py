@@ -93,6 +93,21 @@ def parse_args():
         help="Source/receiver interpolation mode for the JAX solver.",
     )
     parser.add_argument(
+        "--apply-coordinate-epsilon",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply Stride-like spacing-scaled coordinate epsilon before Hicks "
+            "coefficient construction."
+        ),
+    )
+    parser.add_argument(
+        "--coordinate-epsilon-scale",
+        type=float,
+        default=1.0e-3,
+        help="Scale factor for Stride-like coordinate epsilon (`scale * spacing`).",
+    )
+    parser.add_argument(
         "--checkpoint-interval",
         type=int,
         default=32,
@@ -180,6 +195,12 @@ def parse_args():
         help="Zero gradients in the absorbing frame before applying the update.",
     )
     parser.add_argument(
+        "--grad-mask-rampoff",
+        type=int,
+        default=10,
+        help="Stride-like MaskField cosine ramp width in cells.",
+    )
+    parser.add_argument(
         "--smooth-grad",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -192,10 +213,115 @@ def parse_args():
         help="Normalise gradient amplitudes before applying the update.",
     )
     parser.add_argument(
+        "--grad-smooth-sigma",
+        type=float,
+        default=0.25,
+        help=(
+            "Stride-like Gaussian smooth sigma (cells) for gradient "
+            "preprocessing; set <=0 to use legacy box radius."
+        ),
+    )
+    parser.add_argument(
         "--grad-smooth-radius",
         type=int,
         default=2,
         help="Smoothing radius used when --smooth-grad is enabled.",
+    )
+    parser.add_argument(
+        "--grad-norm-guess-change",
+        type=float,
+        default=0.5,
+        help=(
+            "Stride-like NormField scaling in percent: "
+            "mid_model * grad_norm_guess_change / 100."
+        ),
+    )
+    parser.add_argument(
+        "--grad-global-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use one global NormField normalisation value across steps.",
+    )
+    parser.add_argument(
+        "--fw3d-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Stride-style quarter-period trace shifts used in FW3D mode.",
+    )
+    parser.add_argument(
+        "--stride-trace-processing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply Stride-like differentiable ProcessObserved/ProcessTraces "
+            "conditioning before the misfit."
+        ),
+    )
+    parser.add_argument(
+        "--stride-trace-filter-wavelets",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like filter_traces in ProcessWavelets/ProcessObserved.",
+    )
+    parser.add_argument(
+        "--stride-trace-filter-traces",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like filter_traces in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-mute-traces",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like mute_traces in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-norm-per-shot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Stride-like norm_per_shot in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--trace-filter-relaxation-wavelets",
+        type=float,
+        default=0.75,
+        help="Stride-like filter relaxation for ProcessWavelets/ProcessObserved.",
+    )
+    parser.add_argument(
+        "--trace-filter-relaxation-traces",
+        type=float,
+        default=0.75,
+        help="Stride-like filter relaxation for ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-scale-per-shot",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable Stride-like optional scale_per_shot trace scaling.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weighting",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable optional Stride-like time weighting in ProcessTraces.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-power",
+        type=float,
+        default=1.0,
+        help="Exponent for optional Stride-like time-weight ramp.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-start",
+        type=int,
+        default=0,
+        help="Inclusive start sample for optional time weighting.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-weight-stop",
+        type=int,
+        default=None,
+        help="Exclusive stop sample for optional time weighting (default: nt).",
     )
     parser.add_argument(
         "--max-freqs-hz",
@@ -299,6 +425,8 @@ def build_config(args) -> BrainFWIConfig:
             n_transducers=args.n_transducers,
             n_shots=args.n_shots,
             interpolation_type=args.interpolation_type,
+            apply_coordinate_epsilon=args.apply_coordinate_epsilon,
+            coordinate_epsilon_scale=args.coordinate_epsilon_scale,
         ),
         model=ModelConfig(
             density_model=args.density_model,
@@ -322,9 +450,26 @@ def build_config(args) -> BrainFWIConfig:
             damping_velocity_scale=args.damping_velocity_scale,
             stride_grad_processing=args.stride_grad_processing,
             mask_grad=args.mask_grad,
+            grad_mask_rampoff=args.grad_mask_rampoff,
             smooth_grad=args.smooth_grad,
             norm_grad=args.norm_grad,
+            grad_smooth_sigma=args.grad_smooth_sigma,
             grad_smooth_radius=args.grad_smooth_radius,
+            grad_norm_guess_change=args.grad_norm_guess_change,
+            grad_global_norm=args.grad_global_norm,
+            fw3d_mode=args.fw3d_mode,
+            stride_trace_processing=args.stride_trace_processing,
+            stride_trace_filter_wavelets=args.stride_trace_filter_wavelets,
+            stride_trace_filter_traces=args.stride_trace_filter_traces,
+            stride_trace_mute_traces=args.stride_trace_mute_traces,
+            stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
+            stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
+            stride_trace_time_weighting=args.stride_trace_time_weighting,
+            stride_trace_time_weight_power=args.stride_trace_time_weight_power,
+            stride_trace_time_weight_start=args.stride_trace_time_weight_start,
+            stride_trace_time_weight_stop=args.stride_trace_time_weight_stop,
+            trace_filter_relaxation_wavelets=args.trace_filter_relaxation_wavelets,
+            trace_filter_relaxation_traces=args.trace_filter_relaxation_traces,
         ),
     )
 
@@ -351,26 +496,42 @@ def _build_random_shot_schedule(
     shots_per_iter: int,
     seed: int,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
-    """Pre-sample one deterministic random shot subset for each iteration.
+    """Pre-sample a Stride-like deterministic random shot schedule.
 
-    Stride's inverse benchmark chooses `32` shots randomly on every iteration.
-    We precompute that schedule once so the run is reproducible and so each
-    optimiser step sees a stable subset if its loss is evaluated multiple times.
+    Stride's `select_shot_ids(..., randomly=True)` does not sample each
+    iteration independently. Instead, it builds a random permutation queue of
+    available shot IDs and consumes `num` entries each iteration, returning the
+    selected IDs sorted. When the queue is exhausted, a new permutation is
+    generated and consumption continues.
+
+    Two subtle parity details matter:
+    - No repeats occur until the current permutation queue is exhausted.
+    - If the remaining queue length is smaller than `num`, that iteration uses
+      a smaller shot subset.
+
+    We mirror that behaviour so each optimisation step matches Stride's
+    selection math more closely while still staying reproducible in pure Python.
     """
 
     rng = np.random.default_rng(seed)
-    shot_positions = np.arange(int(available_shots.shape[0]), dtype=np.int32)
-    batch_size = min(int(shots_per_iter), int(available_shots.shape[0]))
+    # Stride sorts candidate IDs before random permutation in `_select_slice`.
+    shot_positions = np.sort(np.arange(int(available_shots.shape[0]), dtype=np.int32))
+    batch_size = max(min(int(shots_per_iter), int(available_shots.shape[0])), 1)
     schedule = []
+    selection_queue: list[int] = []
 
     for n_steps in stage_steps:
         stage_schedule = []
         for _ in range(n_steps):
-            chosen_positions = rng.choice(
-                shot_positions, size=batch_size, replace=False
-            )
-            chosen_positions = np.sort(chosen_positions)
-            stage_schedule.append(jnp.asarray(chosen_positions, dtype=jnp.int32))
+            if not selection_queue:
+                selection_queue = rng.permutation(shot_positions).tolist()
+
+            # Match Stride: consume up to `num` entries from the queue, which
+            # may yield a smaller subset near queue boundaries.
+            next_slice = selection_queue[:batch_size]
+            selection_queue = selection_queue[batch_size:]
+            next_slice.sort()
+            stage_schedule.append(jnp.asarray(next_slice, dtype=jnp.int32))
         schedule.append(tuple(stage_schedule))
 
     return tuple(schedule)
@@ -933,17 +1094,22 @@ def main():
         ) -> jnp.ndarray:
             """Apply the configured Stride-like gradient preprocessing stack."""
 
-            del model, stage_index, step_index
+            del stage_index, step_index
             if not config.solver.stride_grad_processing:
                 return grad
 
             return process_global_gradient_stride_like(
                 grad,
                 damping_cells=config.solver.damping_cells,
+                model=model,
                 mask_grad=config.solver.mask_grad,
+                mask_rampoff=config.solver.grad_mask_rampoff,
                 smooth_grad=config.solver.smooth_grad,
+                smooth_sigma=config.solver.grad_smooth_sigma,
                 smooth_radius=config.solver.grad_smooth_radius,
                 norm_grad=config.solver.norm_grad,
+                norm_guess_change=config.solver.grad_norm_guess_change,
+                global_norm=config.solver.grad_global_norm,
             )
 
         if args.optimizer == "sgd":
@@ -998,6 +1164,12 @@ def main():
         metrics["n_transducers"] = config.acquisition.n_transducers
         metrics["n_shots"] = config.acquisition.n_shots
         metrics["n_receivers_per_shot"] = int(params["acquisition"].n_receivers)
+        metrics["apply_coordinate_epsilon"] = (
+            config.acquisition.apply_coordinate_epsilon
+        )
+        metrics["coordinate_epsilon_scale"] = (
+            config.acquisition.coordinate_epsilon_scale
+        )
         metrics["model_source"] = config.model.source
         metrics["density_model"] = config.model.density_model
         metrics["attenuation_model"] = config.model.attenuation_model
@@ -1028,13 +1200,46 @@ def main():
         metrics["source_window_stop"] = config.solver.source_window_stop
         metrics["trace_filter_type"] = config.solver.trace_filter_type
         metrics["trace_filter_relaxation"] = config.solver.trace_filter_relaxation
+        metrics["trace_filter_relaxation_wavelets"] = (
+            config.solver.trace_filter_relaxation_wavelets
+        )
+        metrics["trace_filter_relaxation_traces"] = (
+            config.solver.trace_filter_relaxation_traces
+        )
         metrics["trace_filter_order"] = config.solver.trace_filter_order
         metrics["trace_filter_zero_phase"] = config.solver.trace_filter_zero_phase
+        metrics["fw3d_mode"] = config.solver.fw3d_mode
+        metrics["stride_trace_processing"] = config.solver.stride_trace_processing
+        metrics["stride_trace_filter_wavelets"] = (
+            config.solver.stride_trace_filter_wavelets
+        )
+        metrics["stride_trace_filter_traces"] = config.solver.stride_trace_filter_traces
+        metrics["stride_trace_mute_traces"] = config.solver.stride_trace_mute_traces
+        metrics["stride_trace_norm_per_shot"] = config.solver.stride_trace_norm_per_shot
+        metrics["stride_trace_scale_per_shot"] = (
+            config.solver.stride_trace_scale_per_shot
+        )
+        metrics["stride_trace_time_weighting"] = (
+            config.solver.stride_trace_time_weighting
+        )
+        metrics["stride_trace_time_weight_power"] = (
+            config.solver.stride_trace_time_weight_power
+        )
+        metrics["stride_trace_time_weight_start"] = (
+            config.solver.stride_trace_time_weight_start
+        )
+        metrics["stride_trace_time_weight_stop"] = (
+            config.solver.stride_trace_time_weight_stop
+        )
         metrics["stride_grad_processing"] = config.solver.stride_grad_processing
         metrics["mask_grad"] = config.solver.mask_grad
+        metrics["grad_mask_rampoff"] = config.solver.grad_mask_rampoff
         metrics["smooth_grad"] = config.solver.smooth_grad
         metrics["norm_grad"] = config.solver.norm_grad
+        metrics["grad_smooth_sigma"] = config.solver.grad_smooth_sigma
         metrics["grad_smooth_radius"] = config.solver.grad_smooth_radius
+        metrics["grad_norm_guess_change"] = config.solver.grad_norm_guess_change
+        metrics["grad_global_norm"] = config.solver.grad_global_norm
         metrics["initial_model_rmse"] = float(
             jax.numpy.sqrt(jax.numpy.mean((x0 - x_exact) ** 2))
         )
@@ -1157,13 +1362,38 @@ def main():
             f"{config.solver.damping_type}/"
             f"{config.solver.damping_cells}"
         )
+        print(
+            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale/time_weight): "
+            f"{config.solver.stride_trace_processing}/"
+            f"{config.solver.stride_trace_filter_wavelets}/"
+            f"{config.solver.stride_trace_filter_traces}/"
+            f"{config.solver.stride_trace_mute_traces}/"
+            f"{config.solver.stride_trace_norm_per_shot}/"
+            f"{config.solver.stride_trace_scale_per_shot}/"
+            f"{config.solver.stride_trace_time_weighting}"
+        )
+        print(
+            "Trace relaxations (wavelets/traces): "
+            f"{config.solver.trace_filter_relaxation_wavelets}/"
+            f"{config.solver.trace_filter_relaxation_traces}"
+        )
+        print(
+            "Time-weighting (power/start/stop): "
+            f"{config.solver.stride_trace_time_weight_power}/"
+            f"{config.solver.stride_trace_time_weight_start}/"
+            f"{config.solver.stride_trace_time_weight_stop}"
+        )
         print(f"Stride-like grad processing: {config.solver.stride_grad_processing}")
         print(
-            "Grad pipeline (mask/smooth/norm, radius): "
+            "Grad pipeline (mask/rampoff/smooth/norm, sigma, radius, norm_guess_change, global_norm): "
             f"{config.solver.mask_grad}/"
+            f"{config.solver.grad_mask_rampoff}/"
             f"{config.solver.smooth_grad}/"
             f"{config.solver.norm_grad}, "
-            f"{config.solver.grad_smooth_radius}"
+            f"{config.solver.grad_smooth_sigma}, "
+            f"{config.solver.grad_smooth_radius}, "
+            f"{config.solver.grad_norm_guess_change}, "
+            f"{config.solver.grad_global_norm}"
         )
         print(f"Saved metrics to: {metrics_path}")
         run_complete_marker = write_run_complete_marker(

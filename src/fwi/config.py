@@ -52,6 +52,11 @@ class AcquisitionConfig:
     `interpolation_type` mirrors Stride's receiver/source interpolation switch:
     - `linear`: simple gridpoint interpolation baseline
     - `hicks`: sinc/Kaiser-style precomputed interpolation coefficients
+    `coordinate_epsilon_scale` mirrors Stride's small coordinate perturbation
+    before sparse-function setup. The offset is applied as
+    `coordinate_epsilon_scale * spacing` per spatial dimension in physical
+    coordinates and helps avoid edge-aligned interpolation degeneracies.
+    `apply_coordinate_epsilon` keeps this behaviour configurable for ablations.
     """
 
     n_transducers: int = 256
@@ -62,6 +67,8 @@ class AcquisitionConfig:
     source_cycles: int = 3
     source_amplitude: float = 1.0
     interpolation_type: str = "linear"
+    coordinate_epsilon_scale: float = 1.0e-3
+    apply_coordinate_epsilon: bool = True
 
 
 @dataclass(frozen=True)
@@ -151,12 +158,45 @@ class SolverConfig:
     `stride_grad_processing` toggles a JAX approximation of Stride's default
     `ProcessGlobalGradient` pipeline before each optimiser update.
     `mask_grad`, `smooth_grad`, and `norm_grad` mirror Stride's default
-    processing switches. `grad_smooth_radius` controls the spatial radius of
-    the smoothing kernel when `smooth_grad` is enabled.
-    `trace_filter_type`, `trace_filter_relaxation`, `trace_filter_order`, and
-    `trace_filter_zero_phase` control the trace-domain `f_max` continuation
-    filter. The defaults mirror Stride's low-pass continuation path more
-    closely by using the cosine filter family with relaxation `0.75`.
+    processing switches. `grad_smooth_sigma` mirrors Stride's Gaussian
+    `smooth_sigma` (default `0.25` cells) used by `SmoothField`.
+    `grad_smooth_radius` is retained as a legacy fallback for runs that still
+    use the previous box-filter approximation.
+    `grad_mask_rampoff` mirrors Stride's `MaskField(mask_rampoff=10)` soft edge
+    taper used during gradient masking.
+    `grad_norm_guess_change` mirrors Stride's `norm_guess_change` used by
+    `NormField`: after max-amplitude normalisation, gradients are rescaled by
+    `mid_model * grad_norm_guess_change / 100`. This is an important part of
+    Stride's default gradient magnitude calibration.
+    `grad_global_norm` mirrors Stride's `global_norm` knob. The current JAX
+    implementation keeps parity with the default (`False`) and uses per-step
+    normalisation values.
+    `trace_filter_type`, `trace_filter_order`, and `trace_filter_zero_phase`
+    control the trace-domain `f_max` continuation filter.
+    `trace_filter_relaxation_wavelets` mirrors Stride's
+    `filter_wavelets_relaxation` used by `ProcessWavelets`/`ProcessObserved`.
+    `trace_filter_relaxation_traces` mirrors Stride's
+    `filter_traces_relaxation` used by `ProcessTraces`.
+    `trace_filter_relaxation` is retained as a compatibility fallback and
+    defaults to the same `0.75` continuation value.
+    `fw3d_mode` toggles Stride's quarter-period trace shift used in the
+    benchmark scripts. `stride_trace_processing` enables a Stride-like
+    pre-misfit trace-conditioning path (`ProcessObserved` + `ProcessTraces`)
+    inside the JAX loss, including mute/filter/norm parity while staying fully
+    differentiable.
+    `stride_trace_filter_wavelets` controls Stride-like filtering in
+    `ProcessWavelets`/`ProcessObserved` before forward modelling.
+    `stride_trace_filter_traces` controls Stride-like filtering in
+    `ProcessTraces` before the L2 loss.
+    `stride_trace_mute_traces`, `stride_trace_norm_per_shot`, and
+    `stride_trace_scale_per_shot` mirror the corresponding optional
+    `ProcessTraces` steps. The default benchmark path keeps mute+norm enabled
+    and scale disabled.
+    `stride_trace_time_weighting` adds an optional differentiable time-weight
+    stage in the misfit path to emulate Stride's optional `time_weighting`
+    pipeline hook. Weighting is controlled by
+    `stride_trace_time_weight_power`, `stride_trace_time_weight_start`, and
+    `stride_trace_time_weight_stop`.
     `checkpoint_interval` controls how many time steps of forward history are
     recomputed at once during the explicit adjoint. Smaller values reduce peak
     memory at the cost of more recomputation.
@@ -188,13 +228,30 @@ class SolverConfig:
     diff_source: bool = False
     stride_grad_processing: bool = True
     mask_grad: bool = True
+    grad_mask_rampoff: int = 10
     smooth_grad: bool = True
     norm_grad: bool = True
+    grad_smooth_sigma: float = 0.25
     grad_smooth_radius: int = 2
+    grad_norm_guess_change: float = 0.5
+    grad_global_norm: bool = False
     trace_filter_type: str = "cos"
     trace_filter_relaxation: float = 0.75
+    trace_filter_relaxation_wavelets: float = 0.75
+    trace_filter_relaxation_traces: float = 0.75
     trace_filter_order: int = 1
     trace_filter_zero_phase: bool = False
+    fw3d_mode: bool = True
+    stride_trace_processing: bool = True
+    stride_trace_filter_wavelets: bool = True
+    stride_trace_filter_traces: bool = True
+    stride_trace_mute_traces: bool = True
+    stride_trace_norm_per_shot: bool = True
+    stride_trace_scale_per_shot: bool = False
+    stride_trace_time_weighting: bool = False
+    stride_trace_time_weight_power: float = 1.0
+    stride_trace_time_weight_start: int = 0
+    stride_trace_time_weight_stop: int | None = None
     checkpoint_interval: int = 32
     forward_shot_batch_size: int = 1
     grad_shot_batch_size: int = 1
