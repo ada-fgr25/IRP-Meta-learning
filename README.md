@@ -173,6 +173,18 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 * optimisation history in JSON
 * a `<optimizer>_RUN_COMPLETE.json` marker written at successful end-of-run
 
+### Representative Full Run Snapshot
+
+For a complete Phase 1 parity-oriented run, see:
+
+* `experiments/outputs/ab_stride_parity_full24/sgd_reconstruction.png`
+* `experiments/outputs/ab_stride_parity_full24/sgd_history.png`
+
+On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-scale grid and acquisition) took about **8 hours 19 minutes** wall-clock time.
+
+![Phase 1 Reconstruction](experiments/outputs/ab_stride_parity_full24/sgd_reconstruction.png)
+![Phase 1 History](experiments/outputs/ab_stride_parity_full24/sgd_history.png)
+
 Runtime troubleshooting:
 
 * If logs show `An NVIDIA GPU may be present ... Falling back to cpu`, your
