@@ -177,13 +177,17 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 
 On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-scale grid and acquisition) took about **8 hours 19 minutes** wall-clock time.
 
+#### Figure 1: Phase 1 Reconstruction (`sgd_reconstruction.png`)
+
 ![Phase 1 Reconstruction](image.png)
+
+Side-by-side comparison of the true model, starting model, and final recovered model after 24 steps, plus difference maps. This is the quickest visual check for whether inversion recovers skull/brain structure and whether updates move in the expected direction.
+
+#### Figure 2: Phase 1 Optimisation History (`sgd_history.png`)
+
 ![Phase 1 History](image-1.png)
 
-What these show:
-
-* **Reconstruction panel (`sgd_reconstruction.png`)**: side-by-side comparison of the true model, starting model, and final recovered model after 24 steps, plus difference maps. This is the quickest visual check for whether inversion is recovering skull/brain structure and whether the update moved in the right direction.
-* **History panel (`sgd_history.png`)**: per-stage optimisation curves (loss, and RMSE when available). Because the objective changes across continuation stages, this plot is most useful for checking monotonicity and stability *within* each stage rather than comparing raw loss values across stages.
+Per-stage optimisation curves (loss and RMSE when available). Since the objective changes across continuation stages, this plot is best interpreted for monotonicity and stability *within* each stage rather than by directly comparing raw loss values across stages.
 
 Runtime troubleshooting:
 
