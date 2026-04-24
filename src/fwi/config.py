@@ -192,6 +192,11 @@ class SolverConfig:
     `stride_trace_scale_per_shot` mirror the corresponding optional
     `ProcessTraces` steps. The default benchmark path keeps mute+norm enabled
     and scale disabled.
+    `stride_trace_mute_first_arrival` and `stride_trace_time_tweaking` are
+    explicit parity-version toggles for optional `ProcessTraces` steps that are
+    not implemented yet in the differentiable JAX path. They default to False
+    so the active pipeline remains version-locked to the currently tracked
+    Stride benchmark behavior in this repository.
     `stride_trace_time_weighting` adds an optional differentiable time-weight
     stage in the misfit path to emulate Stride's optional `time_weighting`
     pipeline hook. Weighting is controlled by
@@ -251,9 +256,11 @@ class SolverConfig:
     stride_trace_processing: bool = True
     stride_trace_filter_wavelets: bool = True
     stride_trace_filter_traces: bool = True
+    stride_trace_mute_first_arrival: bool = False
     stride_trace_mute_traces: bool = True
     stride_trace_norm_per_shot: bool = True
     stride_trace_scale_per_shot: bool = False
+    stride_trace_time_tweaking: bool = False
     stride_trace_time_weighting: bool = False
     stride_trace_time_weight_power: float = 1.0
     stride_trace_time_weight_start: int = 0

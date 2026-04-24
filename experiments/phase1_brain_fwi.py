@@ -24,7 +24,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
-from fwi.acoustics import simulate_survey_forward_only
+from fwi.acoustics import simulate_survey_forward_only, stride_trace_pipeline_signature
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
@@ -276,6 +276,15 @@ def parse_args():
         help="Apply Stride-like mute_traces in ProcessTraces.",
     )
     parser.add_argument(
+        "--stride-trace-mute-first-arrival",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable optional Stride mute_first_arrival stage. "
+            "Not implemented in the JAX differentiable path yet."
+        ),
+    )
+    parser.add_argument(
         "--stride-trace-norm-per-shot",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -298,6 +307,15 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable Stride-like optional scale_per_shot trace scaling.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-tweaking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable optional Stride time_tweaking stage. "
+            "Not implemented in the JAX differentiable path yet."
+        ),
     )
     parser.add_argument(
         "--stride-trace-time-weighting",
@@ -471,9 +489,11 @@ def build_config(args) -> BrainFWIConfig:
             stride_trace_processing=args.stride_trace_processing,
             stride_trace_filter_wavelets=args.stride_trace_filter_wavelets,
             stride_trace_filter_traces=args.stride_trace_filter_traces,
+            stride_trace_mute_first_arrival=args.stride_trace_mute_first_arrival,
             stride_trace_mute_traces=args.stride_trace_mute_traces,
             stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
+            stride_trace_time_tweaking=args.stride_trace_time_tweaking,
             stride_trace_time_weighting=args.stride_trace_time_weighting,
             stride_trace_time_weight_power=args.stride_trace_time_weight_power,
             stride_trace_time_weight_start=args.stride_trace_time_weight_start,
@@ -1235,13 +1255,20 @@ def main():
             config.solver.stride_trace_filter_wavelets
         )
         metrics["stride_trace_filter_traces"] = config.solver.stride_trace_filter_traces
+        metrics["stride_trace_mute_first_arrival"] = (
+            config.solver.stride_trace_mute_first_arrival
+        )
         metrics["stride_trace_mute_traces"] = config.solver.stride_trace_mute_traces
         metrics["stride_trace_norm_per_shot"] = config.solver.stride_trace_norm_per_shot
         metrics["stride_trace_scale_per_shot"] = (
             config.solver.stride_trace_scale_per_shot
         )
+        metrics["stride_trace_time_tweaking"] = config.solver.stride_trace_time_tweaking
         metrics["stride_trace_time_weighting"] = (
             config.solver.stride_trace_time_weighting
+        )
+        metrics["stride_trace_pipeline_signature"] = list(
+            stride_trace_pipeline_signature(config)
         )
         metrics["stride_trace_time_weight_power"] = (
             config.solver.stride_trace_time_weight_power
@@ -1385,13 +1412,15 @@ def main():
             f"{config.solver.damping_cells}"
         )
         print(
-            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale/time_weight): "
+            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute_first_arrival/mute/norm/scale/time_tweaking/time_weight): "
             f"{config.solver.stride_trace_processing}/"
             f"{config.solver.stride_trace_filter_wavelets}/"
             f"{config.solver.stride_trace_filter_traces}/"
+            f"{config.solver.stride_trace_mute_first_arrival}/"
             f"{config.solver.stride_trace_mute_traces}/"
             f"{config.solver.stride_trace_norm_per_shot}/"
             f"{config.solver.stride_trace_scale_per_shot}/"
+            f"{config.solver.stride_trace_time_tweaking}/"
             f"{config.solver.stride_trace_time_weighting}"
         )
         print(

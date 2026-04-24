@@ -24,6 +24,7 @@ from fwi.acoustics import (
     shot_loss_from_traces,
     simulate_survey,
     simulate_survey_forward_only,
+    stride_trace_pipeline_signature,
 )
 from fwi.filtering import bandlimit_traces
 from fwi.acoustics import _pad_model_for_solver
@@ -588,6 +589,65 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(unweighted_loss), 0.0)
         self.assertGreater(float(weighted_loss), 0.0)
         self.assertNotEqual(float(weighted_loss), float(unweighted_loss))
+
+    def test_trace_pipeline_signature_exposes_active_step_order(self):
+        """Pipeline signature should make active parity steps explicit."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=True,
+                stride_trace_mute_traces=True,
+                stride_trace_filter_traces=True,
+                stride_trace_norm_per_shot=True,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=False,
+            ),
+        )
+
+        signature = stride_trace_pipeline_signature(config)
+
+        self.assertEqual(
+            signature,
+            (
+                "process_observed.filter_traces",
+                "process_observed.shift_traces",
+                "process_traces.mute_traces",
+                "process_traces.filter_traces",
+                "process_traces.norm_per_shot",
+            ),
+        )
+
+    def test_trace_pipeline_rejects_unimplemented_optional_stride_steps(self):
+        """Unsupported optional Stride steps should fail loudly."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        unsupported_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_first_arrival=True,
+            ),
+        )
+
+        with self.assertRaises(NotImplementedError):
+            shot_loss_from_traces(modelled, observed, unsupported_config, None)
 
     def test_wavelet_preprocess_respects_wavelet_relaxation(self):
         """ProcessWavelets filter should reflect wavelet-side relaxation."""

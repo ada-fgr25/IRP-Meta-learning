@@ -741,6 +741,57 @@ def _stride_like_filter_traces(
     )
 
 
+def stride_trace_pipeline_signature(config: BrainFWIConfig) -> tuple[str, ...]:
+    """Return the active Stride-like trace-processing step sequence.
+
+    Keeping this signature explicit helps us lock behavior to one tracked
+    Stride pipeline version and detect drift when parity-sensitive flags are
+    changed in experiments.
+    """
+
+    if not config.solver.stride_trace_processing:
+        return ()
+
+    steps = []
+    if config.solver.stride_trace_filter_wavelets:
+        steps.append("process_observed.filter_traces")
+    if config.solver.fw3d_mode:
+        steps.append("process_observed.shift_traces")
+    if config.solver.stride_trace_mute_first_arrival:
+        steps.append("process_traces.mute_first_arrival")
+    if config.solver.stride_trace_mute_traces:
+        steps.append("process_traces.mute_traces")
+    if config.solver.stride_trace_filter_traces:
+        steps.append("process_traces.filter_traces")
+    if config.solver.stride_trace_norm_per_shot:
+        steps.append("process_traces.norm_per_shot")
+    if config.solver.stride_trace_scale_per_shot:
+        steps.append("process_traces.scale_per_shot")
+    if config.solver.stride_trace_time_tweaking:
+        steps.append("process_traces.time_tweaking")
+    if config.solver.stride_trace_time_weighting:
+        steps.append("process_traces.time_weighting")
+    return tuple(steps)
+
+
+def _validate_stride_trace_pipeline_support(config: BrainFWIConfig) -> None:
+    """Raise a clear error when unsupported parity options are requested."""
+
+    unsupported_steps = []
+    if config.solver.stride_trace_mute_first_arrival:
+        unsupported_steps.append("mute_first_arrival")
+    if config.solver.stride_trace_time_tweaking:
+        unsupported_steps.append("time_tweaking")
+
+    if unsupported_steps:
+        joined = ", ".join(unsupported_steps)
+        raise NotImplementedError(
+            "Unsupported Stride trace steps requested in JAX path: "
+            f"{joined}. Disable these flags to stay on the version-locked "
+            "pipeline implemented in this repository."
+        )
+
+
 def _process_observed_shot_for_stride_misfit(
     observed_shot: jnp.ndarray,
     config: BrainFWIConfig,
@@ -750,6 +801,7 @@ def _process_observed_shot_for_stride_misfit(
 
     if not config.solver.stride_trace_processing:
         return observed_shot
+    _validate_stride_trace_pipeline_support(config)
 
     observed = (
         _stride_like_filter_traces(
@@ -781,6 +833,7 @@ def _process_trace_pair_for_stride_misfit(
 
     if not config.solver.stride_trace_processing:
         return modelled_shot, observed_shot
+    _validate_stride_trace_pipeline_support(config)
 
     muted_modelled = (
         _stride_like_mute_modelled(
