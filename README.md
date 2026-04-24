@@ -177,8 +177,8 @@ Outputs are written to `experiments/outputs/phase1_brain_fwi/` and include:
 
 On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-scale grid and acquisition) took about **8 hours 19 minutes** wall-clock time.
 
-![Phase 1 Reconstruction](experiments/outputs/ab_stride_parity_full24/sgd_reconstruction.png)
-![Phase 1 History](experiments/outputs/ab_stride_parity_full24/sgd_history.png)
+![Phase 1 Reconstruction](image.png)
+![Phase 1 History](image-1.png)
 
 What these show:
 
