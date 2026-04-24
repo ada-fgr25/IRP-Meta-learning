@@ -179,7 +179,7 @@ On our local CPU setup, this full `24`-step run (3 blocks × 8 steps, benchmark-
 
 #### Figure 1: Phase 1 Reconstruction (`sgd_reconstruction.png`)
 
-![Phase 1 Reconstruction](image.png)
+![Phase 1 Reconstruction](assets/images/phase1_jax_sgd_full24_reconstruction.png)
 
 Side-by-side comparison of the true model, starting model, and final recovered model after 24 steps, plus difference maps. This is the quickest visual check for whether inversion recovers skull/brain structure and whether updates move in the expected direction.
 
@@ -191,7 +191,7 @@ Observed outcome from this run:
 
 #### Figure 2: Phase 1 Optimisation History (`sgd_history.png`)
 
-![Phase 1 History](image-1.png)
+![Phase 1 History](assets/images/phase1_jax_sgd_full24_history.png)
 
 Per-stage optimisation curves (loss and RMSE when available). Since the objective changes across continuation stages, this plot is best interpreted for monotonicity and stability *within* each stage rather than by directly comparing raw loss values across stages.
 
@@ -285,6 +285,22 @@ Even though the Stride workflow is still benchmark-only, it now reports its
 survey setup through the same shared acquisition API used by the JAX path. That
 makes it easier to write experiment code that can swap between the research
 solver and the benchmark reference without changing all of its bookkeeping.
+
+#### Figure 3: Stride Benchmark Reconstruction (`stride_reconstruction.png`)
+
+![Stride Reconstruction](assets/images/phase1_stride_benchmark_reconstruction.png)
+
+True model, starting model, and latest recovered Stride snapshot, plus
+difference maps. This is the Stride-side counterpart to the JAX reconstruction
+figure for visual parity checks.
+
+#### Figure 4: Stride Benchmark History (`stride_history.png`)
+
+![Stride History](assets/images/phase1_stride_benchmark_history.png)
+
+Stage-wise Stride history with top-row loss (parsed from `head.log`) and
+bottom-row model RMSE (computed from saved `alpha2D-Vp-*.h5` snapshots), so it
+can be compared directly to the JAX history panel style.
 
 Replication note:
 
