@@ -256,11 +256,11 @@ class SolverConfig:
     stride_trace_processing: bool = True
     stride_trace_filter_wavelets: bool = True
     stride_trace_filter_traces: bool = True
-    stride_trace_mute_first_arrival: bool = False
+    stride_trace_mute_first_arrival: bool = True
     stride_trace_mute_traces: bool = True
     stride_trace_norm_per_shot: bool = True
     stride_trace_scale_per_shot: bool = False
-    stride_trace_time_tweaking: bool = False
+    stride_trace_time_tweaking: bool = True
     stride_trace_time_weighting: bool = False
     stride_trace_time_weight_power: float = 1.0
     stride_trace_time_weight_start: int = 0

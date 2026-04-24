@@ -619,14 +619,16 @@ class Phase1BrainFWITests(unittest.TestCase):
             (
                 "process_observed.filter_traces",
                 "process_observed.shift_traces",
+                "process_traces.mute_first_arrival[missing->noop]",
                 "process_traces.mute_traces",
                 "process_traces.filter_traces",
                 "process_traces.norm_per_shot",
+                "process_traces.time_tweaking[missing->noop]",
             ),
         )
 
-    def test_trace_pipeline_rejects_unimplemented_optional_stride_steps(self):
-        """Unsupported optional Stride steps should fail loudly."""
+    def test_trace_pipeline_missing_optional_steps_follow_stride_noop_behavior(self):
+        """Missing optional steps should remain no-op, matching bundled Stride."""
 
         base = _tiny_config()
         modelled = jnp.ones(
@@ -646,8 +648,23 @@ class Phase1BrainFWITests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaises(NotImplementedError):
-            shot_loss_from_traces(modelled, observed, unsupported_config, None)
+        baseline_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_first_arrival=False,
+                stride_trace_time_tweaking=False,
+            ),
+        )
+        unsupported_loss = shot_loss_from_traces(
+            modelled, observed, unsupported_config, None
+        )
+        baseline_loss = shot_loss_from_traces(modelled, observed, baseline_config, None)
+        self.assertTrue(bool(jnp.isclose(unsupported_loss, baseline_loss)))
 
     def test_wavelet_preprocess_respects_wavelet_relaxation(self):
         """ProcessWavelets filter should reflect wavelet-side relaxation."""

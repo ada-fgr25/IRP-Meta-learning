@@ -278,10 +278,11 @@ def parse_args():
     parser.add_argument(
         "--stride-trace-mute-first-arrival",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
-            "Enable optional Stride mute_first_arrival stage. "
-            "Not implemented in the JAX differentiable path yet."
+            "Toggle optional Stride mute_first_arrival stage. In the tracked "
+            "local Stride bundle this step is declared but absent, so "
+            "effective behavior is no-op."
         ),
     )
     parser.add_argument(
@@ -311,10 +312,11 @@ def parse_args():
     parser.add_argument(
         "--stride-trace-time-tweaking",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
-            "Enable optional Stride time_tweaking stage. "
-            "Not implemented in the JAX differentiable path yet."
+            "Toggle optional Stride time_tweaking stage. In the tracked local "
+            "Stride bundle this step is declared but absent, so effective "
+            "behavior is no-op."
         ),
     )
     parser.add_argument(
