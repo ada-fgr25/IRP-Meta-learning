@@ -974,6 +974,10 @@ def main():
             ),
             static_argnames=("fmax_hz",),
         )
+        # Match Stride `NormField(global_norm=True)` semantics when requested:
+        # keep the first encountered norm value and reuse it across later
+        # iterations until this run ends.
+        grad_global_norm_value = None
 
         def make_loss_grad_fn(stage_index: int):
             fmax_hz = max_freqs_hz[stage_index]
@@ -1105,10 +1109,11 @@ def main():
             """Apply the configured Stride-like gradient preprocessing stack."""
 
             del stage_index, step_index
+            nonlocal grad_global_norm_value
             if not config.solver.stride_grad_processing:
                 return grad
 
-            return process_global_gradient_stride_like(
+            processed_grad, next_global_norm = process_global_gradient_stride_like(
                 grad,
                 damping_cells=config.solver.damping_cells,
                 model=model,
@@ -1120,7 +1125,12 @@ def main():
                 norm_grad=config.solver.norm_grad,
                 norm_guess_change=config.solver.grad_norm_guess_change,
                 global_norm=config.solver.grad_global_norm,
+                global_norm_value=grad_global_norm_value,
+                return_global_norm=True,
             )
+            if config.solver.grad_global_norm:
+                grad_global_norm_value = next_global_norm
+            return processed_grad
 
         if args.optimizer == "sgd":
             x_hat, history, final_loss, snapshots = run_stagewise_optax(

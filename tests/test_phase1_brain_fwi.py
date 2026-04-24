@@ -38,6 +38,7 @@ from fwi.config import (
 )
 from fwi.medium import build_acoustic_medium
 from fwi.optimisers import process_global_gradient_stride_like
+from fwi.optimisers import _stride_like_mask_rampoff
 from fwi.problem import (
     build_brain_fwi_problem,
     dldx,
@@ -1025,6 +1026,83 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertTrue(bool(jnp.isclose(processed[4, 4], 1.0)))
         self.assertGreater(float(processed[1, 1]), 0.0)
         self.assertLess(float(processed[1, 1]), 1.0)
+
+    def test_stride_like_rampoff_mask_matches_reference_index_logic(self):
+        """JAX mask ramp should mirror Stride's exact index/slice update logic."""
+
+        def stride_reference_mask(
+            shape: tuple[int, int], ramp_size: int
+        ) -> jnp.ndarray:
+            """Local NumPy-style translation of Stride's `_rampoff_mask`."""
+
+            mask = jnp.ones(shape, dtype=jnp.float32)
+            for dim_index in range(len(shape)):
+                if 2 * ramp_size > shape[dim_index]:
+                    continue
+                for edge_index in range(ramp_size):
+                    pos = abs((ramp_size - edge_index - 1) / float(ramp_size - 1))
+                    value = 1.0 - jnp.cos(0.5 * jnp.pi * (1.0 - pos))
+
+                    left_indices = [
+                        slice(edge_index, size - edge_index + 1) for size in shape
+                    ]
+                    left_indices[dim_index] = edge_index
+                    mask = mask.at[tuple(left_indices)].set(value)
+
+                    right_indices = [
+                        slice(edge_index, size - edge_index + 1) for size in shape
+                    ]
+                    right_indices[dim_index] = -edge_index
+                    mask = mask.at[tuple(right_indices)].set(value)
+            return mask
+
+        shape = (9, 7)
+        ramp_size = 4
+        reference = stride_reference_mask(shape, ramp_size)
+        tested = _stride_like_mask_rampoff(shape, ramp_size, jnp.float32)
+
+        self.assertTrue(bool(jnp.allclose(tested, reference)))
+
+    def test_stride_like_gradient_processing_can_reuse_global_norm_value(self):
+        """`global_norm=True` should reuse the first captured norm scale."""
+
+        grad_first = jnp.array([[2.0, 0.0], [0.0, 0.0]], dtype=jnp.float32)
+        grad_second = jnp.array([[1.0, 0.0], [0.0, 0.0]], dtype=jnp.float32)
+
+        first_processed, norm_value = process_global_gradient_stride_like(
+            grad_first,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            global_norm=True,
+            global_norm_value=None,
+            return_global_norm=True,
+        )
+        second_processed, second_norm_value = process_global_gradient_stride_like(
+            grad_second,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            global_norm=True,
+            global_norm_value=norm_value,
+            return_global_norm=True,
+        )
+
+        self.assertTrue(bool(jnp.isclose(norm_value, 2.0 + 1.0e-31)))
+        self.assertTrue(bool(jnp.isclose(second_norm_value, norm_value)))
+        # The second gradient has half the amplitude but reuses the first norm.
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    second_processed,
+                    first_processed * 0.5,
+                    rtol=1.0e-6,
+                    atol=1.0e-7,
+                )
+            )
+        )
 
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""

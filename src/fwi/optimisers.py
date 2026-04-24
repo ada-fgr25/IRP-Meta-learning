@@ -80,26 +80,41 @@ def _gaussian_smooth_2d(field: Array, sigma: float) -> Array:
 
 
 def _stride_like_mask_rampoff(shape: tuple[int, int], ramp_size: int, dtype) -> Array:
-    """Build a Stride-like cosine ramp-off mask over the full field."""
+    """Build a Stride-compatible cosine ramp-off mask over the full field.
+
+    This helper intentionally mirrors the index/slice logic in Stride's
+    `mask_field._rampoff_mask` implementation, including its subtle edge-index
+    behaviour (for example `-0 == 0`). Matching that behaviour keeps the JAX
+    gradient mask closer to the reference pipeline when parity is the goal.
+    """
 
     nx, ny = shape
     ramp = max(int(ramp_size), 0)
     if ramp <= 1:
         return jnp.ones((nx, ny), dtype=dtype)
 
-    dist_x = jnp.minimum(jnp.arange(nx), jnp.arange(nx)[::-1]).astype(jnp.float32)
-    dist_y = jnp.minimum(jnp.arange(ny), jnp.arange(ny)[::-1]).astype(jnp.float32)
+    mask = jnp.ones((nx, ny), dtype=dtype)
+    shape_tuple = (nx, ny)
+    for dim_index in range(len(shape_tuple)):
+        if 2 * ramp > shape_tuple[dim_index]:
+            continue
+        for edge_index in range(ramp):
+            pos = abs((ramp - edge_index - 1) / float(ramp - 1))
+            value = 1.0 - jnp.cos(0.5 * jnp.pi * (1.0 - pos))
 
-    def taper_from_dist(dist: Array) -> Array:
-        # Stride uses `1 - cos(pi/2 * index/(ramp-1))` near the edge and 1
-        # elsewhere. Distances beyond the ramp zone are fully preserved.
-        scaled = dist / float(ramp - 1)
-        edge_val = 1.0 - jnp.cos(0.5 * jnp.pi * jnp.clip(scaled, 0.0, 1.0))
-        return jnp.where(dist < ramp, edge_val, 1.0)
+            left_indices = [
+                slice(edge_index, size - edge_index + 1) for size in shape_tuple
+            ]
+            left_indices[dim_index] = edge_index
+            mask = mask.at[tuple(left_indices)].set(value)
 
-    tx = taper_from_dist(dist_x).astype(dtype)
-    ty = taper_from_dist(dist_y).astype(dtype)
-    return tx[:, None] * ty[None, :]
+            right_indices = [
+                slice(edge_index, size - edge_index + 1) for size in shape_tuple
+            ]
+            right_indices[dim_index] = -edge_index
+            mask = mask.at[tuple(right_indices)].set(value)
+
+    return mask
 
 
 def process_global_gradient_stride_like(
@@ -115,7 +130,9 @@ def process_global_gradient_stride_like(
     norm_grad: bool = True,
     norm_guess_change: float = 0.5,
     global_norm: bool = False,
-) -> Array:
+    global_norm_value: Array | None = None,
+    return_global_norm: bool = False,
+) -> Array | tuple[Array, Array | None]:
     """Approximate Stride's default `ProcessGlobalGradient` pipeline.
 
     Stride's default stack is:
@@ -159,9 +176,17 @@ def process_global_gradient_stride_like(
     #   var_corr = mid_model * norm_guess_change / 100
     # We keep this behaviour in the JAX path so update magnitudes track the
     # benchmark optimiser more closely.
+    next_global_norm = global_norm_value
+
     if norm_grad:
-        del global_norm
-        max_abs = jnp.max(jnp.abs(processed)) + 1.0e-31
+        current_norm = jnp.max(jnp.abs(processed)) + 1.0e-31
+        if global_norm and global_norm_value is not None:
+            norm_value = global_norm_value
+        else:
+            norm_value = current_norm
+            if global_norm:
+                next_global_norm = current_norm
+
         var_corr = 1.0
         if model is not None:
             min_val = jnp.min(model)
@@ -169,8 +194,10 @@ def process_global_gradient_stride_like(
             mid_val = 0.5 * (max_val + min_val)
             guessed = mid_val * (norm_guess_change / 100.0)
             var_corr = jnp.where(jnp.abs(guessed) > 0.0, guessed, 1.0)
-        processed = processed * (var_corr / max_abs)
+        processed = processed * (var_corr / norm_value)
 
+    if return_global_norm:
+        return processed, next_global_norm
     return processed
 
 
