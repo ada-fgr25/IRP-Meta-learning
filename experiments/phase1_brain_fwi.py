@@ -386,6 +386,15 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
+        "--jax-enable-x64",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable JAX float64 mode for parity studies. "
+            "Default keeps float32, which is closer to Stride's default runtime."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("experiments/outputs/phase1_brain_fwi"),
@@ -868,6 +877,9 @@ def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
     args = parse_args()
+    # Numerical-runtime parity depends on dtype choices. Set this explicitly so
+    # run metadata and JAX execution mode stay aligned.
+    jax.config.update("jax_enable_x64", args.jax_enable_x64)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.clear_output:
         removed_outputs = clear_run_outputs(args.output_dir, args.optimizer)
@@ -1298,6 +1310,11 @@ def main():
         metrics["data_rmse"] = None
         metrics["data_mae"] = None
         metrics["data_metrics_status"] = "pending_full_survey"
+        metrics["jax_default_backend"] = jax.default_backend()
+        metrics["jax_enable_x64"] = bool(jax.config.jax_enable_x64)
+        metrics["jax_default_matmul_precision"] = str(
+            jax.config.jax_default_matmul_precision
+        )
 
         panels = [
             ("True velocity", x_exact),
@@ -1398,6 +1415,12 @@ def main():
         print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
         print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
         print(f"Shot reduction mode: {config.solver.shot_reduction}")
+        print(
+            "JAX numerics (backend/enable_x64/matmul_precision): "
+            f"{metrics['jax_default_backend']}/"
+            f"{metrics['jax_enable_x64']}/"
+            f"{metrics['jax_default_matmul_precision']}"
+        )
         print(
             "Source window (enabled/alpha/start/stop): "
             f"{config.solver.source_window_enabled}/"
