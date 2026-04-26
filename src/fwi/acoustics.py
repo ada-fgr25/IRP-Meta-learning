@@ -387,15 +387,26 @@ def _sponge2_subdomain_masks(
     config: BrainFWIConfig,
     shape: tuple[int, int],
     dtype: jnp.dtype,
+    sponge_damp: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Derive explicit interior/boundary masks from Sponge2 damping.
 
     Devito runs separate interior and boundary stencils for the acoustic step,
     with the sponge damping term only active in absorbing subdomains selected by
     geometry. In JAX we mirror that structure by deriving binary masks directly
-    from the configured absorbing-frame width (`damping_cells`), avoiding
-    value-dependent branching so the update remains fully differentiable.
+    from either:
+    - the active damping field (`sponge_damp > 0`) when available, or
+    - the configured absorbing-frame width (`damping_cells`) as a fallback.
+
+    Using the damping field as the primary selector keeps subdomain activation
+    aligned with the actual runtime boundary term, which is closer to how
+    Devito's subdomain-specific boundary equations are activated.
     """
+
+    if sponge_damp is not None:
+        boundary = (jnp.abs(sponge_damp) > 0.0).astype(dtype)
+        interior = 1.0 - boundary
+        return interior, boundary
 
     nx, ny = shape
     cells = max(int(config.solver.damping_cells), 0)
@@ -739,6 +750,44 @@ def _stride_like_filter_traces(
         order=config.solver.trace_filter_order,
         zero_phase=config.solver.trace_filter_zero_phase,
     )
+
+
+def stride_trace_pipeline_signature(config: BrainFWIConfig) -> tuple[str, ...]:
+    """Return the active Stride-like trace-processing step sequence.
+
+    Keeping this signature explicit helps us lock behavior to one tracked
+    Stride pipeline version and detect drift when parity-sensitive flags are
+    changed in experiments.
+    """
+
+    if not config.solver.stride_trace_processing:
+        return ()
+
+    steps = []
+    if config.solver.stride_trace_filter_wavelets:
+        steps.append("process_observed.filter_traces")
+    if config.solver.fw3d_mode:
+        steps.append("process_observed.shift_traces")
+    if config.solver.stride_trace_mute_first_arrival:
+        # The tracked Stride bundle declares this optional step but does not
+        # ship its implementation in the local `steps_registry`, so effective
+        # behavior is a no-op when requested.
+        steps.append("process_traces.mute_first_arrival[missing->noop]")
+    if config.solver.stride_trace_mute_traces:
+        steps.append("process_traces.mute_traces")
+    if config.solver.stride_trace_filter_traces:
+        steps.append("process_traces.filter_traces")
+    if config.solver.stride_trace_norm_per_shot:
+        steps.append("process_traces.norm_per_shot")
+    if config.solver.stride_trace_scale_per_shot:
+        steps.append("process_traces.scale_per_shot")
+    if config.solver.stride_trace_time_tweaking:
+        # Same behavior as above: declared in default pipeline but missing in
+        # the tracked local step registry, therefore effectively a no-op.
+        steps.append("process_traces.time_tweaking[missing->noop]")
+    if config.solver.stride_trace_time_weighting:
+        steps.append("process_traces.time_weighting")
+    return tuple(steps)
 
 
 def _process_observed_shot_for_stride_misfit(
@@ -1204,7 +1253,7 @@ def _propose_next_field(
         sponge_linear = velocity_sq * sponge_damp * config.time.dt
         sponge_quadratic = velocity_sq * (sponge_damp**2) * (config.time.dt**2)
         interior_mask, boundary_subdomain_mask = _sponge2_subdomain_masks(
-            config, u_curr.shape, u_curr.dtype
+            config, u_curr.shape, u_curr.dtype, sponge_damp=sponge_damp
         )
 
         # Interior stencil: identical to the undamped second-order step.
@@ -1564,6 +1613,30 @@ def _normalise_shot_batch_size(
     if batch_size <= 0:
         raise ValueError(f"{argument_name} must be a positive integer.")
     return min(batch_size, max(total_shots, 1))
+
+
+def _apply_shot_reduction(
+    total_loss: jnp.ndarray,
+    total_grad: jnp.ndarray,
+    n_selected_shots: int,
+    reduction: str,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Apply the configured reduction across selected shots.
+
+    Stride's optimisation loop uses additive shot accumulation, so `sum` is the
+    parity-preserving default. We also expose a `mean` mode explicitly because
+    some experiments prefer update magnitudes that are invariant to the number
+    of selected shots in each iteration.
+    """
+
+    if reduction == "sum":
+        return total_loss, total_grad
+    if reduction == "mean":
+        scale = 1.0 / float(max(int(n_selected_shots), 1))
+        return total_loss * scale, total_grad * scale
+    raise ValueError(
+        "Unsupported shot_reduction " f"'{reduction}'. Use 'sum' or 'mean'."
+    )
 
 
 def _replay_segment_history(
@@ -1974,7 +2047,12 @@ def loss_and_grad(
             init,
             (active_shot_indices, observed_data),
         )
-        return total_loss, total_grad
+        return _apply_shot_reduction(
+            total_loss,
+            total_grad,
+            total_shots,
+            config.solver.shot_reduction,
+        )
 
     # Batched shot accumulation improves throughput by evaluating several
     # independent shot forward+adjoint solves together, while masking the tail
@@ -2033,4 +2111,9 @@ def loss_and_grad(
         init,
         (batched_shot_indices, batched_observed, batched_active_mask),
     )
-    return total_loss, total_grad
+    return _apply_shot_reduction(
+        total_loss,
+        total_grad,
+        total_shots,
+        config.solver.shot_reduction,
+    )

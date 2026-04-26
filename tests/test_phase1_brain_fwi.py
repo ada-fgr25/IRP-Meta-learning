@@ -24,6 +24,7 @@ from fwi.acoustics import (
     shot_loss_from_traces,
     simulate_survey,
     simulate_survey_forward_only,
+    stride_trace_pipeline_signature,
 )
 from fwi.filtering import bandlimit_traces
 from fwi.acoustics import _pad_model_for_solver
@@ -38,6 +39,7 @@ from fwi.config import (
 )
 from fwi.medium import build_acoustic_medium
 from fwi.optimisers import process_global_gradient_stride_like
+from fwi.optimisers import _stride_like_mask_rampoff
 from fwi.problem import (
     build_brain_fwi_problem,
     dldx,
@@ -588,6 +590,82 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(weighted_loss), 0.0)
         self.assertNotEqual(float(weighted_loss), float(unweighted_loss))
 
+    def test_trace_pipeline_signature_exposes_active_step_order(self):
+        """Pipeline signature should make active parity steps explicit."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_filter_wavelets=True,
+                fw3d_mode=True,
+                stride_trace_mute_traces=True,
+                stride_trace_filter_traces=True,
+                stride_trace_norm_per_shot=True,
+                stride_trace_scale_per_shot=False,
+                stride_trace_time_weighting=False,
+            ),
+        )
+
+        signature = stride_trace_pipeline_signature(config)
+
+        self.assertEqual(
+            signature,
+            (
+                "process_observed.filter_traces",
+                "process_observed.shift_traces",
+                "process_traces.mute_first_arrival[missing->noop]",
+                "process_traces.mute_traces",
+                "process_traces.filter_traces",
+                "process_traces.norm_per_shot",
+                "process_traces.time_tweaking[missing->noop]",
+            ),
+        )
+
+    def test_trace_pipeline_missing_optional_steps_follow_stride_noop_behavior(self):
+        """Missing optional steps should remain no-op, matching bundled Stride."""
+
+        base = _tiny_config()
+        modelled = jnp.ones(
+            (base.time.nt, base.acquisition.n_transducers), dtype=jnp.float32
+        )
+        observed = jnp.zeros_like(modelled)
+
+        unsupported_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_first_arrival=True,
+            ),
+        )
+
+        baseline_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(
+                base.solver,
+                stride_trace_processing=True,
+                stride_trace_mute_first_arrival=False,
+                stride_trace_time_tweaking=False,
+            ),
+        )
+        unsupported_loss = shot_loss_from_traces(
+            modelled, observed, unsupported_config, None
+        )
+        baseline_loss = shot_loss_from_traces(modelled, observed, baseline_config, None)
+        self.assertTrue(bool(jnp.isclose(unsupported_loss, baseline_loss)))
+
     def test_wavelet_preprocess_respects_wavelet_relaxation(self):
         """ProcessWavelets filter should reflect wavelet-side relaxation."""
 
@@ -740,6 +818,53 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertTrue(
             bool(jnp.allclose(grad_batch, grad_seq, rtol=1.0e-5, atol=1.0e-6))
+        )
+
+    def test_shot_reduction_mean_scales_loss_and_gradient_by_shot_count(self):
+        """Mean reduction should scale additive shot terms by `1 / n_shots`."""
+
+        base = _tiny_config()
+        sum_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, shot_reduction="sum"),
+        )
+        mean_config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, shot_reduction="mean"),
+        )
+        params_sum = init_params(jax.random.PRNGKey(0), config=sum_config)
+        params_mean = init_params(jax.random.PRNGKey(0), config=mean_config)
+
+        n_shots = params_sum["y_obs"].shape[0]
+        loss_sum, grad_sum = loss_and_grad(
+            params_sum["x0"],
+            params_sum["acquisition"],
+            params_sum["config"],
+            params_sum["medium"],
+            params_sum["y_obs"],
+            shot_batch_size=2,
+        )
+        loss_mean, grad_mean = loss_and_grad(
+            params_mean["x0"],
+            params_mean["acquisition"],
+            params_mean["config"],
+            params_mean["medium"],
+            params_mean["y_obs"],
+            shot_batch_size=2,
+        )
+
+        expected_scale = 1.0 / float(n_shots)
+        self.assertTrue(
+            bool(jnp.allclose(loss_mean, loss_sum * expected_scale, rtol=1.0e-6))
+        )
+        self.assertTrue(
+            bool(jnp.allclose(grad_mean, grad_sum * expected_scale, rtol=1.0e-5))
         )
 
     def test_explicit_adjoint_supports_higher_order_differentiation(self):
@@ -979,6 +1104,83 @@ class Phase1BrainFWITests(unittest.TestCase):
         self.assertGreater(float(processed[1, 1]), 0.0)
         self.assertLess(float(processed[1, 1]), 1.0)
 
+    def test_stride_like_rampoff_mask_matches_reference_index_logic(self):
+        """JAX mask ramp should mirror Stride's exact index/slice update logic."""
+
+        def stride_reference_mask(
+            shape: tuple[int, int], ramp_size: int
+        ) -> jnp.ndarray:
+            """Local NumPy-style translation of Stride's `_rampoff_mask`."""
+
+            mask = jnp.ones(shape, dtype=jnp.float32)
+            for dim_index in range(len(shape)):
+                if 2 * ramp_size > shape[dim_index]:
+                    continue
+                for edge_index in range(ramp_size):
+                    pos = abs((ramp_size - edge_index - 1) / float(ramp_size - 1))
+                    value = 1.0 - jnp.cos(0.5 * jnp.pi * (1.0 - pos))
+
+                    left_indices = [
+                        slice(edge_index, size - edge_index + 1) for size in shape
+                    ]
+                    left_indices[dim_index] = edge_index
+                    mask = mask.at[tuple(left_indices)].set(value)
+
+                    right_indices = [
+                        slice(edge_index, size - edge_index + 1) for size in shape
+                    ]
+                    right_indices[dim_index] = -edge_index
+                    mask = mask.at[tuple(right_indices)].set(value)
+            return mask
+
+        shape = (9, 7)
+        ramp_size = 4
+        reference = stride_reference_mask(shape, ramp_size)
+        tested = _stride_like_mask_rampoff(shape, ramp_size, jnp.float32)
+
+        self.assertTrue(bool(jnp.allclose(tested, reference)))
+
+    def test_stride_like_gradient_processing_can_reuse_global_norm_value(self):
+        """`global_norm=True` should reuse the first captured norm scale."""
+
+        grad_first = jnp.array([[2.0, 0.0], [0.0, 0.0]], dtype=jnp.float32)
+        grad_second = jnp.array([[1.0, 0.0], [0.0, 0.0]], dtype=jnp.float32)
+
+        first_processed, norm_value = process_global_gradient_stride_like(
+            grad_first,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            global_norm=True,
+            global_norm_value=None,
+            return_global_norm=True,
+        )
+        second_processed, second_norm_value = process_global_gradient_stride_like(
+            grad_second,
+            damping_cells=0,
+            mask_grad=False,
+            smooth_grad=False,
+            norm_grad=True,
+            global_norm=True,
+            global_norm_value=norm_value,
+            return_global_norm=True,
+        )
+
+        self.assertTrue(bool(jnp.isclose(norm_value, 2.0 + 1.0e-31)))
+        self.assertTrue(bool(jnp.isclose(second_norm_value, norm_value)))
+        # The second gradient has half the amplitude but reuses the first norm.
+        self.assertTrue(
+            bool(
+                jnp.allclose(
+                    second_processed,
+                    first_processed * 0.5,
+                    rtol=1.0e-6,
+                    atol=1.0e-7,
+                )
+            )
+        )
+
     def test_stride_like_boundary_mask_damps_edges_more_than_interior(self):
         """Stride-like damping should attenuate edge cells more than the centre."""
 
@@ -1060,6 +1262,29 @@ class Phase1BrainFWITests(unittest.TestCase):
         )
         self.assertTrue(bool(jnp.isclose(interior[0, 0], 0.0)))
         self.assertTrue(bool(jnp.isclose(boundary[0, 0], 1.0)))
+        self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
+
+    def test_sponge2_subdomain_masks_can_follow_runtime_damping_field(self):
+        """Runtime sponge field should control boundary-mask activation."""
+
+        base = _tiny_config()
+        config = BrainFWIConfig(
+            grid=base.grid,
+            time=base.time,
+            acquisition=base.acquisition,
+            model=base.model,
+            solver=replace(base.solver, damping_mode="sponge2", damping_cells=4),
+        )
+        velocity = jnp.full((config.grid.nx, config.grid.ny), 1500.0, dtype=jnp.float32)
+        _, sponge_damp = _build_boundary_terms(config, velocity)
+        interior, boundary = _sponge2_subdomain_masks(
+            config,
+            (config.grid.nx, config.grid.ny),
+            jnp.float32,
+            sponge_damp=sponge_damp,
+        )
+
+        self.assertTrue(bool(jnp.allclose(boundary, (jnp.abs(sponge_damp) > 0.0))))
         self.assertTrue(bool(jnp.allclose(interior + boundary, 1.0)))
 
     def test_sponge2_default_reflection_matches_stride_width_rule(self):

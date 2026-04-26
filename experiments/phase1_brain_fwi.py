@@ -24,7 +24,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
-from fwi.acoustics import simulate_survey_forward_only
+from fwi.acoustics import simulate_survey_forward_only, stride_trace_pipeline_signature
 from fwi.config import (
     AcquisitionConfig,
     BrainFWIConfig,
@@ -276,6 +276,16 @@ def parse_args():
         help="Apply Stride-like mute_traces in ProcessTraces.",
     )
     parser.add_argument(
+        "--stride-trace-mute-first-arrival",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Toggle optional Stride mute_first_arrival stage. In the tracked "
+            "local Stride bundle this step is declared but absent, so "
+            "effective behavior is no-op."
+        ),
+    )
+    parser.add_argument(
         "--stride-trace-norm-per-shot",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -298,6 +308,16 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable Stride-like optional scale_per_shot trace scaling.",
+    )
+    parser.add_argument(
+        "--stride-trace-time-tweaking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Toggle optional Stride time_tweaking stage. In the tracked local "
+            "Stride bundle this step is declared but absent, so effective "
+            "behavior is no-op."
+        ),
     )
     parser.add_argument(
         "--stride-trace-time-weighting",
@@ -349,6 +369,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--shot-reduction",
+        choices=["sum", "mean"],
+        default="sum",
+        help=(
+            "How to reduce multi-shot loss/gradient contributions each step. "
+            "'sum' matches Stride update scaling."
+        ),
+    )
+    parser.add_argument(
         "--final-shots",
         type=int,
         default=None,
@@ -358,6 +387,15 @@ def parse_args():
         ),
     )
     parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument(
+        "--jax-enable-x64",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable JAX float64 mode for parity studies. "
+            "Default keeps float32, which is closer to Stride's default runtime."
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -437,6 +475,7 @@ def build_config(args) -> BrainFWIConfig:
             checkpoint_interval=args.checkpoint_interval,
             forward_shot_batch_size=args.forward_shot_batch_size,
             grad_shot_batch_size=args.grad_shot_batch_size,
+            shot_reduction=args.shot_reduction,
             source_window_enabled=args.source_window_enabled,
             source_window_alpha=args.source_window_alpha,
             source_window_start=args.source_window_start,
@@ -461,9 +500,11 @@ def build_config(args) -> BrainFWIConfig:
             stride_trace_processing=args.stride_trace_processing,
             stride_trace_filter_wavelets=args.stride_trace_filter_wavelets,
             stride_trace_filter_traces=args.stride_trace_filter_traces,
+            stride_trace_mute_first_arrival=args.stride_trace_mute_first_arrival,
             stride_trace_mute_traces=args.stride_trace_mute_traces,
             stride_trace_norm_per_shot=args.stride_trace_norm_per_shot,
             stride_trace_scale_per_shot=args.stride_trace_scale_per_shot,
+            stride_trace_time_tweaking=args.stride_trace_time_tweaking,
             stride_trace_time_weighting=args.stride_trace_time_weighting,
             stride_trace_time_weight_power=args.stride_trace_time_weight_power,
             stride_trace_time_weight_start=args.stride_trace_time_weight_start,
@@ -838,6 +879,9 @@ def main():
     """Run a full classical FWI experiment and persist summaries to disk."""
 
     args = parse_args()
+    # Numerical-runtime parity depends on dtype choices. Set this explicitly so
+    # run metadata and JAX execution mode stay aligned.
+    jax.config.update("jax_enable_x64", args.jax_enable_x64)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.clear_output:
         removed_outputs = clear_run_outputs(args.output_dir, args.optimizer)
@@ -964,6 +1008,10 @@ def main():
             ),
             static_argnames=("fmax_hz",),
         )
+        # Match Stride `NormField(global_norm=True)` semantics when requested:
+        # keep the first encountered norm value and reuse it across later
+        # iterations until this run ends.
+        grad_global_norm_value = None
 
         def make_loss_grad_fn(stage_index: int):
             fmax_hz = max_freqs_hz[stage_index]
@@ -1095,10 +1143,11 @@ def main():
             """Apply the configured Stride-like gradient preprocessing stack."""
 
             del stage_index, step_index
+            nonlocal grad_global_norm_value
             if not config.solver.stride_grad_processing:
                 return grad
 
-            return process_global_gradient_stride_like(
+            processed_grad, next_global_norm = process_global_gradient_stride_like(
                 grad,
                 damping_cells=config.solver.damping_cells,
                 model=model,
@@ -1110,7 +1159,12 @@ def main():
                 norm_grad=config.solver.norm_grad,
                 norm_guess_change=config.solver.grad_norm_guess_change,
                 global_norm=config.solver.grad_global_norm,
+                global_norm_value=grad_global_norm_value,
+                return_global_norm=True,
             )
+            if config.solver.grad_global_norm:
+                grad_global_norm_value = next_global_norm
+            return processed_grad
 
         if args.optimizer == "sgd":
             x_hat, history, final_loss, snapshots = run_stagewise_optax(
@@ -1182,6 +1236,7 @@ def main():
         metrics["checkpoint_interval"] = config.solver.checkpoint_interval
         metrics["forward_shot_batch_size"] = config.solver.forward_shot_batch_size
         metrics["grad_shot_batch_size"] = config.solver.grad_shot_batch_size
+        metrics["shot_reduction"] = config.solver.shot_reduction
         metrics["damping_mode"] = config.solver.damping_mode
         metrics["damping_type"] = config.solver.damping_type
         metrics["damping_cells"] = config.solver.damping_cells
@@ -1214,13 +1269,20 @@ def main():
             config.solver.stride_trace_filter_wavelets
         )
         metrics["stride_trace_filter_traces"] = config.solver.stride_trace_filter_traces
+        metrics["stride_trace_mute_first_arrival"] = (
+            config.solver.stride_trace_mute_first_arrival
+        )
         metrics["stride_trace_mute_traces"] = config.solver.stride_trace_mute_traces
         metrics["stride_trace_norm_per_shot"] = config.solver.stride_trace_norm_per_shot
         metrics["stride_trace_scale_per_shot"] = (
             config.solver.stride_trace_scale_per_shot
         )
+        metrics["stride_trace_time_tweaking"] = config.solver.stride_trace_time_tweaking
         metrics["stride_trace_time_weighting"] = (
             config.solver.stride_trace_time_weighting
+        )
+        metrics["stride_trace_pipeline_signature"] = list(
+            stride_trace_pipeline_signature(config)
         )
         metrics["stride_trace_time_weight_power"] = (
             config.solver.stride_trace_time_weight_power
@@ -1250,6 +1312,11 @@ def main():
         metrics["data_rmse"] = None
         metrics["data_mae"] = None
         metrics["data_metrics_status"] = "pending_full_survey"
+        metrics["jax_default_backend"] = jax.default_backend()
+        metrics["jax_enable_x64"] = bool(jax.config.jax_enable_x64)
+        metrics["jax_default_matmul_precision"] = str(
+            jax.config.jax_default_matmul_precision
+        )
 
         panels = [
             ("True velocity", x_exact),
@@ -1349,6 +1416,13 @@ def main():
         print(f"Checkpoint interval: {config.solver.checkpoint_interval}")
         print(f"Forward-only shot batch size: {config.solver.forward_shot_batch_size}")
         print(f"Forward+adjoint shot batch size: {config.solver.grad_shot_batch_size}")
+        print(f"Shot reduction mode: {config.solver.shot_reduction}")
+        print(
+            "JAX numerics (backend/enable_x64/matmul_precision): "
+            f"{metrics['jax_default_backend']}/"
+            f"{metrics['jax_enable_x64']}/"
+            f"{metrics['jax_default_matmul_precision']}"
+        )
         print(
             "Source window (enabled/alpha/start/stop): "
             f"{config.solver.source_window_enabled}/"
@@ -1363,13 +1437,15 @@ def main():
             f"{config.solver.damping_cells}"
         )
         print(
-            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute/norm/scale/time_weight): "
+            "Trace pipeline (enabled/filter_wavelets/filter_traces/mute_first_arrival/mute/norm/scale/time_tweaking/time_weight): "
             f"{config.solver.stride_trace_processing}/"
             f"{config.solver.stride_trace_filter_wavelets}/"
             f"{config.solver.stride_trace_filter_traces}/"
+            f"{config.solver.stride_trace_mute_first_arrival}/"
             f"{config.solver.stride_trace_mute_traces}/"
             f"{config.solver.stride_trace_norm_per_shot}/"
             f"{config.solver.stride_trace_scale_per_shot}/"
+            f"{config.solver.stride_trace_time_tweaking}/"
             f"{config.solver.stride_trace_time_weighting}"
         )
         print(
