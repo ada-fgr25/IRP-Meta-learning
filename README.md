@@ -292,6 +292,23 @@ Representative timing for `--mode both` (from `experiments/outputs/stride_benchm
 * inverse: `4057.04 s` (about `67 min 37 s`)
 * total: `4094.93 s` (about `68 min 15 s`)
 
+JAX-vs-Stride runtime note (why JAX is slower in this benchmark setup):
+
+* For the same benchmark-scale problem, the JAX research run is currently much slower on CPU (about `8 h 19 m` vs about `68 m` for Stride `--mode both`).
+* The JAX path keeps a fully differentiable end-to-end pipeline (explicit adjoint, differentiable trace/gradient processing, and parity instrumentation), which adds overhead relative to Stride's mature Devito-centric compiled runtime.
+* We also run conservatively for memory stability (sequential/mini-batched shot accumulation plus checkpointed adjoint replay), which protects against out-of-memory failures but increases wall time.
+* This is expected for the current "research parity + differentiability first" stage, and not yet an apples-to-apples throughput optimisation contest.
+
+Checkpoint interval (`--checkpoint-interval`) in this implementation:
+
+* It is the number of time steps per adjoint replay segment.
+* For `nt=2500` and `checkpoint_interval=128`, the reverse pass uses `ceil(2500 / 128) = 20` segments.
+* Practical tradeoff in our explicit-segment VJP setup has two competing effects:
+  * Smaller interval lowers per-segment replay memory, but it increases the number of segments and therefore the size of saved checkpoint tensors (`checkpoint_prevs/checkpoint_currs`), plus segment-boundary overhead.
+  * Larger interval reduces segment count and overhead (often faster), but raises per-segment replay memory and can OOM when memory headroom is limited.
+* Because of those competing effects, memory is not monotonic with interval in this implementation. In our benchmark-scale CPU environment we observed that going below `128` can also trigger OOM (more segment checkpoints), while much larger values can OOM for the opposite reason (larger segment replay state).
+* We therefore use `--checkpoint-interval 128` as a practical compromise for stable full runs on this machine.
+
 #### Figure 3: Stride Benchmark Reconstruction (`stride_reconstruction.png`)
 
 ![Stride Reconstruction](assets/images/phase1_stride_benchmark_reconstruction.png)
