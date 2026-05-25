@@ -1,3 +1,11 @@
+> **Pre-IRP exploratory repository**
+>
+> This repository contains exploratory baseline work completed before the official Imperial IRP repository was assigned. The official IRP repository is:
+>
+> https://github.com/ese-ada-lovelace-2025/irp-fgr25
+>
+> Relevant material has been transferred there and clearly identified as pre-IRP baseline work.
+
 # Meta-Learning Optimisation for Full-Waveform Inversion (FWI)
 
 This repository contains the implementation of my MSc Individual Research Project at Imperial College London.
